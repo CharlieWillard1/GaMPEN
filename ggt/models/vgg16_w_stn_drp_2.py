@@ -57,7 +57,13 @@ class vgg16_w_stn_drp_2(nn.Module):
         self.fc_loc[2].bias.data.copy_(torch.tensor(ident, dtype=torch.float))
 
         # Featurizer -- VGG
-        self.vgg = models.vgg16(pretrained=self.pretrained)
+        # Modern torchvision weights API, as ggt/models/vgg.py already
+        # uses. The old `pretrained=` kwarg survives only through a
+        # deprecation shim and warns twice per construction. Default
+        # behaviour is unchanged.
+        self.vgg = models.vgg16(
+            weights="VGG16_Weights.DEFAULT" if self.pretrained else None
+        )
         self.vgg.classifier[6] = nn.Linear(4096, self.n_out)
 
         # Adding dropout layers infront of Conv2D Layers and
