@@ -8,7 +8,14 @@ from .tensor_utils import (
     metric_output_transform_al_cov_loss,
 )
 from .data_utils import load_cat
-from .model_utils import get_output_shape, enable_dropout, specify_dropout_rate
+from .model_utils import (
+    get_output_shape,
+    enable_dropout,
+    specify_dropout_rate,
+    strip_module_prefix,
+    load_checkpoint_tolerant,
+    set_requires_grad,
+)
 
 __all__ = [
     "discover_devices",
@@ -20,6 +27,9 @@ __all__ = [
     "get_output_shape",
     "enable_dropout",
     "specify_dropout_rate",
+    "strip_module_prefix",
+    "load_checkpoint_tolerant",
+    "set_requires_grad",
     "metric_output_transform_al_loss",
     "metric_output_transform_al_cov_loss",
 ]
