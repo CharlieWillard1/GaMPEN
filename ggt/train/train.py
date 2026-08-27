@@ -204,7 +204,9 @@ def train(**kwargs):
 
     # Load the model from a saved state if provided
     if args["model_state"]:
-        model.load_state_dict(torch.load(args["model_state"]))
+        model.load_state_dict(
+            torch.load(args["model_state"], weights_only=True)
+        )
 
     # Define the optimizer
     optimizer = opt.SGD(

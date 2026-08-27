@@ -19,7 +19,9 @@ def arsinh_normalize(X):
 
 def load_tensor(filename, tensors_path, as_numpy=True):
     """Load a Torch tensor from disk."""
-    return torch.load(tensors_path / (filename + ".pt")).numpy()
+    return torch.load(
+        tensors_path / (filename + ".pt"), weights_only=True
+    ).numpy()
 
 
 def standardize_labels(

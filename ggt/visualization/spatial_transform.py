@@ -129,7 +129,7 @@ def main(
     model = model.to(device)
 
     # Load the model from a saved state if provided
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, weights_only=True))
 
     # Build a DataLoader to pull a batch from the desired split
     dataset = FITSDataset(

@@ -64,9 +64,11 @@ def predict(
     # Load the model
     logging.info("Loading model...")
     if device == "cpu":
-        model.load_state_dict(torch.load(model_path, map_location="cpu"))
+        model.load_state_dict(
+            torch.load(model_path, map_location="cpu", weights_only=True)
+        )
     else:
-        model.load_state_dict(torch.load(model_path))
+        model.load_state_dict(torch.load(model_path, weights_only=True))
 
     # Create a data loader
     loader = get_data_loader(

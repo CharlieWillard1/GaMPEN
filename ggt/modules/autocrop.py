@@ -91,7 +91,11 @@ def main(
 
     # Load the model from a saved state if provided
     model.load_state_dict(
-        torch.load(model_path, map_location=torch.device(device))
+        torch.load(
+            model_path,
+            map_location=torch.device(device),
+            weights_only=True,
+        )
     )
 
     # Collect all images, then iterate
