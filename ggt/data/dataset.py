@@ -1,5 +1,6 @@
 from astropy.io import fits
 import numpy as np
+import os
 from functools import partial
 from pathlib import Path
 from tqdm import tqdm
@@ -19,6 +20,27 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
 mp.set_sharing_strategy("file_system")
+
+# Upper bound on the tensor-preloading pool. Preloading is IO-bound on
+# many small files, so a very large pool adds process-spawn overhead
+# without adding throughput.
+MAX_PRELOAD_WORKERS = 16
+
+
+def default_preload_workers():
+    """Sensible default size for the tensor-preloading pool.
+
+    `mp.cpu_count()` reports every core on the machine, not the ones this
+    process is allowed to use, so on a shared login node or under a
+    cgroup/scheduler limit it over-subscribes badly -- a 128-core box
+    would spawn 128 readers per split. Prefer the affinity mask where the
+    platform provides one, and cap the result.
+    """
+    try:
+        n = len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on macOS / Windows
+        n = mp.cpu_count()
+    return max(1, min(n, MAX_PRELOAD_WORKERS))
 
 
 class FITSDataset(Dataset):
@@ -41,6 +63,7 @@ class FITSDataset(Dataset):
         scaling_data_dir=None,
         scaling_slug=None,
         load_labels=True,
+        n_preload_workers=None,
     ):
 
         # Set data directories
@@ -105,7 +128,10 @@ class FITSDataset(Dataset):
         n = len(self.filenames)
         logging.info(f"Preloading {n} tensors...")
         load_fn = partial(load_tensor, tensors_path=self.tensors_path)
-        with mp.Pool(mp.cpu_count()) as p:
+        if n_preload_workers is None:
+            n_preload_workers = default_preload_workers()
+        logging.info(f"Using {n_preload_workers} preload workers...")
+        with mp.Pool(n_preload_workers) as p:
             # Load to NumPy, then convert to PyTorch (hack to solve system
             # issue with multiprocessing + PyTorch tensors)
             self.observations = list(
