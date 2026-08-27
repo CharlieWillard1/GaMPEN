@@ -64,6 +64,7 @@ class FITSDataset(Dataset):
         scaling_slug=None,
         load_labels=True,
         n_preload_workers=None,
+        observations=None,
     ):
 
         # Set data directories
@@ -115,29 +116,52 @@ class FITSDataset(Dataset):
                 scaling=label_scaling,
             )
 
-        # If we haven't already generated PyTorch tensor files, generate them
-        logging.info("Generating PyTorch tensors from FITS files...")
-        for filename in tqdm(self.filenames):
-            filepath = self.tensors_path / (filename + ".pt")
-            if not filepath.is_file():
-                load_path = self.cutouts_path / filename
-                t = FITSDataset.load_fits_as_tensor(load_path)
-                torch.save(t, filepath)
-
-        # Preload the tensors
+        # Pixel source. By default, cache each FITS cutout as a .pt
+        # tensor and preload those. A caller that already has the pixels
+        # -- from an HDF5 store, a memory-mapped array, a
+        # survey-specific backend -- can pass them via `observations`
+        # and skip both the per-file cache and the multiprocessing
+        # preload entirely. `observations` may be any sequence indexed
+        # in the same order as `file_name` in the catalog.
         n = len(self.filenames)
-        logging.info(f"Preloading {n} tensors...")
-        load_fn = partial(load_tensor, tensors_path=self.tensors_path)
-        if n_preload_workers is None:
-            n_preload_workers = default_preload_workers()
-        logging.info(f"Using {n_preload_workers} preload workers...")
-        with mp.Pool(n_preload_workers) as p:
-            # Load to NumPy, then convert to PyTorch (hack to solve system
-            # issue with multiprocessing + PyTorch tensors)
-            self.observations = list(
-                tqdm(p.imap(load_fn, self.filenames), total=n)
-            )
-        self.observations = [torch.from_numpy(x) for x in self.observations]
+        if observations is not None:
+            if len(observations) != n:
+                raise ValueError(
+                    f"observations has {len(observations)} entries "
+                    f"but the catalog has {n} rows; they must be in "
+                    "the same order as the `file_name` column"
+                )
+            logging.info(f"Using {n} caller-supplied observations.")
+            self.observations = [
+                x if torch.is_tensor(x) else torch.as_tensor(np.asarray(x))
+                for x in observations
+            ]
+        else:
+            # If we haven't already generated PyTorch tensor files,
+            # generate them
+            logging.info("Generating PyTorch tensors from FITS files...")
+            for filename in tqdm(self.filenames):
+                filepath = self.tensors_path / (filename + ".pt")
+                if not filepath.is_file():
+                    load_path = self.cutouts_path / filename
+                    t = FITSDataset.load_fits_as_tensor(load_path)
+                    torch.save(t, filepath)
+
+            # Preload the tensors
+            logging.info(f"Preloading {n} tensors...")
+            load_fn = partial(load_tensor, tensors_path=self.tensors_path)
+            if n_preload_workers is None:
+                n_preload_workers = default_preload_workers()
+            logging.info(f"Using {n_preload_workers} preload workers...")
+            with mp.Pool(n_preload_workers) as p:
+                # Load to NumPy, then convert to PyTorch (hack to solve system
+                # issue with multiprocessing + PyTorch tensors)
+                self.observations = list(
+                    tqdm(p.imap(load_fn, self.filenames), total=n)
+                )
+            self.observations = [
+                torch.from_numpy(x) for x in self.observations
+            ]
 
     def __getitem__(self, index):
         """Magic method to index into the dataset."""
