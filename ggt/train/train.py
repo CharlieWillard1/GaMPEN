@@ -323,8 +323,13 @@ def build_net(
     allow_broad_reinit=False,
     root=None,
     parallel=None,
+    init_checkpoint=None,
 ):
-    """Build, load the HSC checkpoint into, and freeze the network."""
+    """Build the network, load weights into it, and freeze what is asked.
+
+    `init_checkpoint` continues from one of our own runs instead of a
+    published checkpoint -- same geometry, so it should load whole.
+    """
     import torch
     import torch.nn as nn
 
@@ -346,6 +351,7 @@ def build_net(
         init_from=init_from,
         root=root,
         allow_broad_reinit=allow_broad_reinit,
+        checkpoint=init_checkpoint,
     )
     if report is None:
         log.info("init_from=scratch: no checkpoint loaded")
@@ -526,6 +532,7 @@ def run(args):
         freeze=args.freeze,
         allow_broad_reinit=args.allow_broad_reinit,
         root=root,
+        init_checkpoint=args.init_checkpoint,
     )
 
     optimizer, criterion, scheduler = build_optimizer(
@@ -674,6 +681,14 @@ def parse_pixel_zp(value):
     "--freeze",
     type=click.Choice(list(models.FREEZE_SPECS), case_sensitive=False),
     default="vgg_features_early",
+)
+@click.option(
+    "--init-checkpoint",
+    type=str,
+    default=None,
+    help="Continue from an explicit .pt -- typically best.pt from an "
+    "earlier run of our own -- instead of a published checkpoint. Same "
+    "geometry, so it should load whole.",
 )
 @click.option(
     "--allow-broad-reinit",

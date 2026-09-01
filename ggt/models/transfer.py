@@ -15,6 +15,7 @@ transfers too -- one tensor, not two.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from ggt.data import layout
 from ggt.surveys import euclid
@@ -148,18 +149,35 @@ def build_model(
 
 
 def load_pretrained(
-    model, z_bin, init_from="real", root=None, allow_broad_reinit=False
+    model,
+    z_bin,
+    init_from="real",
+    root=None,
+    allow_broad_reinit=False,
+    checkpoint=None,
 ):
-    """Load the bin's checkpoint, allowing only `fc_loc.0.weight` to reset.
+    """Load a checkpoint, allowing only `fc_loc.0.weight` to reset.
 
     Anything else being re-initialised means the transfer is not doing what
     we think, so it raises rather than training silently from scratch.
+
+    `checkpoint` overrides the published-checkpoint lookup with an explicit
+    path -- typically a `best.pt` from an earlier run of our own, to
+    continue training under different settings. Such a checkpoint has the
+    same geometry as the model being built, so it should load at 100% with
+    nothing re-initialised; if it does not, the two runs disagree about
+    something, and that is worth understanding before continuing.
     """
     import torch
 
     from ggt.utils import load_checkpoint_tolerant
 
-    path = checkpoint_path(z_bin, init_from, root)
+    if checkpoint is not None:
+        path = Path(checkpoint)
+        if not path.exists():
+            raise SystemExit(f"--init-checkpoint {path} does not exist")
+    else:
+        path = checkpoint_path(z_bin, init_from, root)
     if path is None:
         log.info("init_from=scratch: no checkpoint loaded")
         return None
