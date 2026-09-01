@@ -1,332 +1,719 @@
-# -*- coding: utf-8 -*-
-import click
+#!/usr/bin/env python
+"""Fine-tune a GaMPEN model on one (z_bin, band) Euclid dataset.
+
+    python -m ggt.train.train --z-bin 0 --band VIS --run-name my_run
+
+This replaces the original GaMPEN training entry point, which hardcoded a
+strict ``load_state_dict`` (incompatible with transferring weights across an
+input-size change), a single SGD parameter group, mandatory MLflow, and
+``--parallel`` defaulting to on. The order of operations still follows it
+closely, and every generic building block -- the network, the loss, the
+metrics, the dataset -- is unchanged.
+
+What it adds: the pixel-zeropoint guard, create-once/reuse splits and a
+persisted scaler, checkpoint surgery with a re-initialisation whitelist,
+per-group learning rates, and a `config.json` a run can be reconstructed
+from.
+
+Each step is a separate importable function so that analysis notebooks can
+rebuild the identical datasets and model without training anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
 import logging
-import math
+import os
+import subprocess
+import sys
 from pathlib import Path
-from functools import partial
 
-import mlflow
+import numpy as np
 
-import torch
-import torch.nn as nn
-import torch.optim as opt
+from ggt.data import cache_dataset, layout, splits
+from ggt.models import transfer as models
+from ggt.surveys import euclid
 
-import kornia.augmentation as K
+log = logging.getLogger(__name__)
 
-from ggt.data import FITSDataset, get_data_loader
-from ggt.models import model_factory, model_stats, save_trained_model
-from ggt.train import create_trainer
-from ggt.utils import discover_devices, specify_dropout_rate
-from ggt.visualization.spatial_transform import visualize_spatial_transform
-from ggt.losses import AleatoricLoss, AleatoricCovLoss
+# The pretrained head's output order.  Never permute.
+TARGET_COLUMNS = list(euclid.TARGET_COLUMNS)
 
 
-@click.command()
-@click.option("--experiment_name", type=str, default="demo")
-@click.option(
-    "--run_id",
-    type=str,
-    default=None,
-    help="""The run id. Practically this only needs to be used
-if you are resuming a previosuly run experiment""",
-)
-@click.option(
-    "--run_name",
-    type=str,
-    default=None,
-    help="""A run is supposed to be a sub-class of an experiment.
-So this variable should be specified accordingly""",
-)
-@click.option(
-    "--model_type",
-    type=click.Choice(
-        [
-            "ggt",
-            "vgg16",
-            "ggt_no_gconv",
-            "vgg16_w_stn",
-            "vgg16_w_stn_drp",
-            "vgg16_w_stn_drp_2",
-            "vgg16_w_stn_at_drp",
-            "vgg16_w_stn_oc_drp",
-        ],
-        case_sensitive=False,
-    ),
-    default="vgg16_w_stn_oc_drp",
-)
-@click.option("--model_state", type=click.Path(exists=True), default=None)
-@click.option("--data_dir", type=click.Path(exists=True), required=True)
-@click.option(
-    "--split_slug",
-    type=str,
-    required=True,
-    help="""This specifies how the data is split into train/
-devel/test sets. Balanced/Unbalanced refer to whether selecting
-equal number of images from each class. xs, sm, lg, dev all refer
-to what fraction is picked for train/devel/test.""",
-)
-@click.option(
-    "--target_metrics",
-    type=str,
-    default="bt_g",
-    help="""Enter the target metrics separated by commas""",
-)
-@click.option(
-    "--loss",
-    type=click.Choice(
-        [
-            "mse",
-            "aleatoric",
-            "aleatoric_cov",
-        ],
-        case_sensitive=False,
-    ),
-    default="aleatoric_cov",
-    help="""The loss function to use""",
-)
-@click.option(
-    "--expand_data",
-    type=int,
-    default=1,
-    help="""This controls the factor by which the training
-data is augmented""",
-)
-@click.option("--cutout_size", type=int, default=167)
-@click.option("--channels", type=int, default=3)
-@click.option(
-    "--n_workers",
-    type=int,
-    default=4,
-    help="""The number of workers to be used during the
-data loading process.""",
-)
-@click.option("--batch_size", type=int, default=16)
-@click.option("--epochs", type=int, default=40)
-@click.option("--lr", type=float, default=5e-7)
-@click.option("--momentum", type=float, default=0.9)
-@click.option("--weight_decay", type=float, default=0)
-@click.option(
-    "--parallel/--no-parallel",
-    default=True,
-    help="""The parallel argument controls whether or not
-to use multiple GPUs when they are available""",
-)
-@click.option(
-    "--normalize/--no-normalize",
-    default=True,
-    help="""The normalize argument controls whether or not, the
-loaded images will be normalized using the arsinh function""",
-)
-@click.option(
-    "--label_scaling",
-    type=str,
-    default="std",
-    help="""The label scaling option controls whether to
-standardize the labels or not. Set this to std for sklearn's
-StandardScaling() and minmax for sklearn's MinMaxScaler().
-This is especially important when predicting multiple
-outputs""",
-)
-@click.option(
-    "--transform/--no-transform",
-    default=True,
-    help="""If True, the training images are passed through a
-series of random transformations""",
-)
-@click.option(
-    "--crop/--no-crop",
-    default=True,
-    help="""If True, all images are passed through a cropping
-operation before being fed into the network. Images are cropped
-to the cutout_size parameter""",
-)
-@click.option(
-    "--repeat_dims/--no-repeat_dims",
-    default=True,
-    help="""In case of multi-channel data, whether to repeat a two
-dimensional image as many times as the number of channels""",
-)
-@click.option(
-    "--nesterov/--no-nesterov",
-    default=False,
-    help="""Whether to use Nesterov momentum or not""",
-)
-@click.option(
-    "--dropout_rate",
-    type=float,
-    default=None,
-    help="""The dropout rate to use for all the layers in the
-    model. If this is set to None, then the default dropout rate
-    in the specific model is used.""",
-)
-def train(**kwargs):
-    """Runs the training procedure using MLFlow."""
+# --- provenance --------------------------------------------------------------
 
-    # Copy and log args
-    args = {k: v for k, v in kwargs.items()}
 
-    # Discover devices
-    args["device"] = discover_devices()
+def git_describe(repo_dir):
+    """``(sha, branch)`` for a git checkout, or ``(None, None)``."""
 
-    # Create target metrics array
-    target_metric_arr = args["target_metrics"].split(",")
+    def run(*args):
+        try:
+            out = subprocess.run(
+                ["git", *args],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
 
-    # Calculating the number of outputs
-    n_out = len(target_metric_arr)
-    if args["loss"] == "aleatoric":
-        n_out = int(n_out * 2)
-    elif args["loss"] == "aleatoric_cov":
-        n_out = int((3 * n_out + n_out**2) / 2)
+    return run("rev-parse", "HEAD"), run("rev-parse", "--abbrev-ref", "HEAD")
 
-    # Create the model given model_type
-    cls = model_factory(args["model_type"])
-    model_args = {
-        "cutout_size": args["cutout_size"],
-        "channels": args["channels"],
-        "n_out": n_out,
+
+def enclosing_repo(start):
+    """Nearest ancestor containing `.git`, or None.
+
+    A git submodule's `.git` is a *file*, not a directory, so test for
+    existence rather than `is_dir()`. Walking up beats hardcoded
+    `parents[n]` arithmetic, which silently returns the wrong directory the
+    moment a module moves.
+    """
+    p = Path(start).resolve()
+    for candidate in (p, *p.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+# --- 1. paths ----------------------------------------------------------------
+
+
+def resolve(z_bin, band, run_name, root=None, figures_dir=None):
+    """Resolve every path this run touches, failing early if data is absent.
+
+    Weights and metrics land on the data volume (a `best.pt`/`last.pt` pair
+    is 1.2 GB); figures land in the analysis repo where they can be looked
+    at. See `ggt.data.layout` for how the two roots are found.
+    """
+    if band not in euclid.BANDS:
+        raise SystemExit(
+            f"unknown band {band!r}; expected one of {euclid.BANDS}"
+        )
+
+    info = layout.info_csv(z_bin, band, root)
+    if not info.exists():
+        raise SystemExit(
+            f"no info.csv at {info}\n"
+            f"Build the pixel cache and this band's labels first:\n"
+            f"  python -m euclid_prep.build_cache --z-bin {z_bin} "
+            f"--subset-catalog <subset.fits>\n"
+            f"  python -m euclid_prep.build_info  --z-bin {z_bin} "
+            f"--band {band} --subset-catalog <subset.fits> "
+            f"--galfit-catalog <galfit_results.fits>"
+        )
+
+    run = layout.ensure(layout.run_dir(z_bin, band, run_name, root))
+    figs = Path(figures_dir) if figures_dir else layout.figures_dir(run_name)
+    return {
+        "info_csv": info,
+        "band_dir": layout.band_dir(z_bin, band, root),
+        "cache_manifest": layout.cache_manifest_path(z_bin, root),
+        "run_dir": run,
+        "figures_dir": figs,
+        "metrics_csv": run / "metrics.csv",
+        "train_log": run / "train.log",
+        "config_json": run / "config.json",
     }
 
-    if "drp" in args["model_type"].split("_"):
-        logging.info(
-            "Using dropout rate of {} in the model".format(
-                args["dropout_rate"]
-            )
+
+# --- 2. the pixel-zeropoint guard --------------------------------------------
+
+
+def check_pixel_zp(z_bin, pixel_zp, root=None):
+    """Refuse to train if the cache was not built with the requested ZP.
+
+    There is no FITS export any more, so the convention lives in
+    ``cache_manifest.json``. Training on differently-scaled pixels than you
+    believe -- a factor of 9.1 in VIS, ~6 mag in the NIR bands -- produces a
+    model that trains perfectly well and means nothing.
+    """
+    manifest_path = layout.cache_manifest_path(z_bin, root)
+    if not manifest_path.exists():
+        raise SystemExit(f"no cache manifest at {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    built = manifest.get("pixel_zp")
+
+    if (built is None) != (pixel_zp is None) or (
+        built is not None
+        and pixel_zp is not None
+        and not np.isclose(float(built), float(pixel_zp))
+    ):
+        raise SystemExit(
+            "PIXEL_ZP mismatch -- refusing to start.\n"
+            f"  requested --pixel-zp : {pixel_zp!r}\n"
+            f"  cache was built with : {built!r}\n"
+            f"  cache manifest       : {manifest_path}\n"
+            "Rebuild the cache with a matching --pixel-zp, or pass the value "
+            "the cache actually holds."
         )
-        model_args["dropout"] = "True"
+    log.info("pixel_zp %r agrees with the cache manifest", built)
+    return manifest
 
-    model = cls(**model_args)
-    model = nn.DataParallel(model) if args["parallel"] else model
-    model = model.to(args["device"])
 
-    # Chnaging the default dropout rate if specified
-    if args["dropout_rate"] is not None:
-        specify_dropout_rate(model, args["dropout_rate"])
+# --- 3. splits and scaler ----------------------------------------------------
 
-    # Load the model from a saved state if provided
-    if args["model_state"]:
-        model.load_state_dict(
-            torch.load(args["model_state"], weights_only=True)
-        )
 
-    # Define the optimizer
-    optimizer = opt.SGD(
-        model.parameters(),
-        lr=args["lr"],
-        momentum=args["momentum"],
-        nesterov=args["nesterov"],
-        weight_decay=args["weight_decay"],
+def prepare_split(
+    z_bin,
+    band,
+    seed=42,
+    fractions=None,
+    balance_on="bt",
+    force_resplit=False,
+    root=None,
+):
+    """Create the split and scaler once; reuse and verify them thereafter."""
+    manifest = splits.build(
+        z_bin,
+        band,
+        seed=seed,
+        fractions=fractions,
+        balance_on=balance_on,
+        root=root,
+        force_resplit=force_resplit,
+        target_metrics=TARGET_COLUMNS,
+    )
+    sizes = manifest["sizes"]
+    log.info(
+        "split %s (train/devel/test = %d/%d/%d, hashes %s)",
+        manifest["slug"],
+        sizes["train"],
+        sizes["devel"],
+        sizes["test"],
+        "/".join(
+            manifest["hashes"][s][:8] for s in ("train", "devel", "test")
+        ),
     )
 
-    # Define the criterion
-    loss_dict = {
-        "mse": nn.MSELoss(),
-        "aleatoric": AleatoricLoss(average=True),
-        "aleatoric_cov": AleatoricCovLoss(
-            num_var=len(target_metric_arr), average=True
+    scaler = splits.load_scaler(
+        z_bin, band, seed=seed, root=root, target_metrics=TARGET_COLUMNS
+    )
+    for name, mean, scale in zip(TARGET_COLUMNS, scaler.mean_, scaler.scale_):
+        log.info("scaler %-24s mean %+.6f  scale %.6f", name, mean, scale)
+    return manifest, scaler
+
+
+# --- 4. datasets and loaders -------------------------------------------------
+
+
+def truncate(ds, n):
+    """Keep only the first `n` rows (smoke / overfit tests)."""
+    n = min(n, len(ds.labels))
+    ds.labels = ds.labels[:n]
+    ds.observations = ds.observations[:n]
+    ds.filenames = ds.filenames[:n]
+    ds.data_info = ds.data_info.iloc[:n]
+    return ds
+
+
+def build_loaders(
+    z_bin,
+    band,
+    scaler,
+    seed=42,
+    cutout_size=None,
+    channels=3,
+    repeat_dims=True,
+    normalize=True,
+    transform=True,
+    expand_data=1,
+    batch_size=16,
+    n_workers=8,
+    root=None,
+    limit=None,
+):
+    """Three datasets sharing one scaler, plus a clean train-eval loader.
+
+    The train split gets the augmentation stack; devel and test get a bare
+    centre-crop. A fourth loader re-reads the *train* split without
+    augmentation or expansion, because a train loss measured through random
+    rotations cannot be compared against the devel loss.
+    """
+    import kornia.augmentation as K
+    import torch.nn as nn
+    from ggt.data import get_data_loader
+
+    if cutout_size is None:
+        cutout_size = euclid.target_crop_px(z_bin)
+    slug = splits.slug_for(seed)
+
+    crop_only = nn.Sequential(K.CenterCrop(cutout_size))
+    augmented = nn.Sequential(
+        K.CenterCrop(cutout_size),
+        K.RandomHorizontalFlip(),
+        K.RandomVerticalFlip(),
+        K.RandomRotation(360),
+    )
+
+    def make(split, tfm, expand):
+        ds = cache_dataset.make_dataset(
+            z_bin,
+            band,
+            split=split,
+            slug=slug,
+            root=root,
+            target_metrics=TARGET_COLUMNS,
+            cutout_size=cutout_size,
+            channels=channels,
+            repeat_dims=repeat_dims,
+            normalize=normalize,
+            transform=tfm,
+            expand_factor=expand,
+            scaler=scaler,
+        )
+        return truncate(ds, limit) if limit else ds
+
+    train_tfm = augmented if transform else crop_only
+    datasets = {
+        "train": make("train", train_tfm, expand_data),
+        "devel": make("devel", crop_only, 1),
+        "test": make("test", crop_only, 1),
+    }
+
+    # The train-eval view differs from the train set only in its transform and
+    # expansion, so share the loaded pixels rather than reading them a second
+    # time -- that is another ~7.5 GB of resident memory on a full 12k bin.
+    train_eval = copy.copy(datasets["train"])
+    train_eval.transform = crop_only
+    train_eval.expand_factor = 1
+
+    loaders = {
+        "train": get_data_loader(
+            datasets["train"], batch_size, n_workers, shuffle=True
+        ),
+        "devel": get_data_loader(
+            datasets["devel"], batch_size, n_workers, shuffle=False
+        ),
+        "test": get_data_loader(
+            datasets["test"], batch_size, n_workers, shuffle=False
         ),
     }
-    criterion = loss_dict[args["loss"]]
-
-    # Create a DataLoader factory based on command-line args
-    loader_factory = partial(
-        get_data_loader,
-        batch_size=args["batch_size"],
-        n_workers=args["n_workers"],
+    train_eval_loader = get_data_loader(
+        train_eval, batch_size, n_workers, shuffle=False
     )
 
-    # Select the desired transforms
-    T = None
-    T_crop = None
+    sizes = {k: len(v) for k, v in datasets.items()}
+    log.info(
+        "datasets: train %d (x%d augmented) / devel %d / test %d, "
+        "cutout_size %d",
+        sizes["train"],
+        expand_data,
+        sizes["devel"],
+        sizes["test"],
+        cutout_size,
+    )
+    return loaders, train_eval_loader, sizes, cutout_size
 
-    if args["crop"]:
-        T = nn.Sequential(
-            K.CenterCrop(args["cutout_size"]),
-        )
-        T_crop = nn.Sequential(
-            K.CenterCrop(args["cutout_size"]),
+
+# --- 5. model ----------------------------------------------------------------
+
+
+def build_net(
+    z_bin,
+    cutout_size,
+    init_from="real",
+    dropout=None,
+    channels=3,
+    freeze="none",
+    allow_broad_reinit=False,
+    root=None,
+    parallel=None,
+):
+    """Build, load the HSC checkpoint into, and freeze the network."""
+    import torch
+    import torch.nn as nn
+
+    n_out = int((3 * len(TARGET_COLUMNS) + len(TARGET_COLUMNS) ** 2) / 2)
+    if dropout is None:
+        dropout = models.default_dropout(z_bin, init_from)
+
+    net = models.build_model(
+        cutout_size=cutout_size,
+        n_out=n_out,
+        channels=channels,
+        dropout_rate=dropout,
+        parallel=False,
+    )
+
+    report = models.load_pretrained(
+        net,
+        z_bin,
+        init_from=init_from,
+        root=root,
+        allow_broad_reinit=allow_broad_reinit,
+    )
+    if report is None:
+        log.info("init_from=scratch: no checkpoint loaded")
+    else:
+        log.info(
+            "checkpoint: %.2f%% of parameters loaded, re-initialised %s, "
+            "unexpected %s",
+            100 * report["loaded_fraction"],
+            report["reinitialised"] or "nothing",
+            report["unexpected"] or "nothing",
         )
 
-    if args["transform"]:
-        T = nn.Sequential(
-            K.CenterCrop(args["cutout_size"]),
-            K.RandomHorizontalFlip(),
-            K.RandomVerticalFlip(),
-            K.RandomRotation(360),
+    n_frozen = models.apply_freeze(net, freeze)
+    trainable = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    log.info(
+        "freeze=%s: %d parameters frozen, %d trainable",
+        freeze,
+        n_frozen,
+        trainable,
+    )
+
+    # Upstream wraps in DataParallel unconditionally, which breaks
+    # single-GPU runs and prefixes every saved key with `module.`.
+    n_gpu = torch.cuda.device_count()
+    if parallel is None:
+        parallel = n_gpu > 1
+    if parallel and n_gpu > 1:
+        net = nn.DataParallel(net)
+        log.info("wrapped in DataParallel across %d GPUs", n_gpu)
+    else:
+        log.info("single-device run (%d GPU visible)", n_gpu)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    net = net.to(device)
+    return (
+        net,
+        report,
+        device,
+        {
+            "n_frozen": n_frozen,
+            "trainable": trainable,
+            "dropout": dropout,
+            "n_out": n_out,
+            "parallel": bool(parallel and n_gpu > 1),
+        },
+    )
+
+
+# --- 6. optimiser, loss, schedule --------------------------------------------
+
+HEAD_PATTERNS = ("fc_loc.0", "vgg.classifier")
+
+
+def build_optimizer(
+    net,
+    lr,
+    head_lr_mult=10.0,
+    momentum=0.99,
+    weight_decay=1e-4,
+    nesterov=False,
+    patience=25,
+):
+    """SGD with a faster head, the aleatoric covariance loss, and a schedule.
+
+    ``fc_loc.0`` is the one re-initialised tensor and the classifier is the
+    only part whose targets changed, so both need to move faster than a
+    backbone that is already close to right.
+    """
+    import torch
+    import torch.optim as opt
+    from ggt.losses import AleatoricCovLoss
+
+    head, backbone = [], []
+    for name, param in net.named_parameters():
+        if not param.requires_grad:
+            continue
+        (head if any(p in name for p in HEAD_PATTERNS) else backbone).append(
+            param
         )
 
-        T_crop = nn.Sequential(
-            K.CenterCrop(args["cutout_size"]),
-        )
+    groups = [
+        {"params": backbone, "lr": lr, "name": "backbone"},
+        {"params": head, "lr": lr * head_lr_mult, "name": "head"},
+    ]
+    optimizer = opt.SGD(
+        groups,
+        lr=lr,
+        momentum=momentum,
+        nesterov=nesterov,
+        weight_decay=weight_decay,
+    )
+    log.info(
+        "optimiser: %d backbone tensors @ lr %.2e, %d head tensors @ lr %.2e",
+        len(backbone),
+        lr,
+        len(head),
+        lr * head_lr_mult,
+    )
 
-    # Generate the DataLoaders and log the train/devel/test split sizes
-    splits = ("train", "devel", "test")
-    datasets = {
-        k: FITSDataset(
-            data_dir=args["data_dir"],
-            slug=args["split_slug"],
-            cutout_size=args["cutout_size"],
-            channels=args["channels"],
-            normalize=args["normalize"],
-            repeat_dims=args["repeat_dims"],
-            label_col=target_metric_arr,
-            transform=T if k == "train" else T_crop,
-            expand_factor=args["expand_data"] if k == "train" else 1,
-            label_scaling=args["label_scaling"],
-            split=k,
-        )
-        for k in splits
+    criterion = AleatoricCovLoss(num_var=len(TARGET_COLUMNS), average=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        factor=0.3,
+        patience=max(1, patience // 3),
+    )
+    return optimizer, criterion, scheduler
+
+
+# --- 7/8. run and record -----------------------------------------------------
+
+
+def write_config(path, args, extra):
+    """Dump everything needed to reconstruct this run from the file alone."""
+    payload = {
+        **{k: _jsonable(v) for k, v in vars(args).items()},
+        **{k: _jsonable(v) for k, v in extra.items()},
     }
-    loaders = {k: loader_factory(v) for k, v in datasets.items()}
-    args["splits"] = {k: len(v.dataset) for k, v in loaders.items()}
+    Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    log.info("wrote %s", path)
+    return payload
 
-    # Start the training process
-    mlflow.set_experiment(args["experiment_name"])
-    with mlflow.start_run(run_id=args["run_id"], run_name=args["run_name"]):
 
-        # Write the parameters and model stats to MLFlow
-        args = {**args, **model_stats(model)}  # py3.9: d1 |= d2
-        for k, v in args.items():
-            mlflow.log_param(k, v)
+def _jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
 
-        # Set up trainer
-        trainer, _evaluator = create_trainer(
-            model, optimizer, criterion, loaders, args["device"]
+
+def run(args):
+    """The whole pipeline, in order."""
+    from ggt.train import create_trainer
+
+    root = args.data_root
+    resolved = resolve(
+        args.z_bin, args.band, args.run_name, root, args.figures_dir
+    )
+    manifest = check_pixel_zp(args.z_bin, args.pixel_zp, root)
+
+    split_manifest, scaler = prepare_split(
+        args.z_bin,
+        args.band,
+        seed=args.seed,
+        force_resplit=args.force_resplit,
+        root=root,
+    )
+
+    loaders, train_eval_loader, sizes, cutout_size = build_loaders(
+        args.z_bin,
+        args.band,
+        scaler,
+        seed=args.seed,
+        cutout_size=args.cutout_size,
+        channels=args.channels,
+        repeat_dims=args.repeat_dims,
+        normalize=args.normalize,
+        transform=args.transform,
+        expand_data=args.expand_data,
+        batch_size=args.batch_size,
+        n_workers=args.n_workers,
+        root=root,
+        limit=args.limit,
+    )
+
+    net, report, device, net_info = build_net(
+        args.z_bin,
+        cutout_size,
+        init_from=args.init_from,
+        dropout=args.dropout,
+        channels=args.channels,
+        freeze=args.freeze,
+        allow_broad_reinit=args.allow_broad_reinit,
+        root=root,
+    )
+
+    optimizer, criterion, scheduler = build_optimizer(
+        net,
+        args.lr,
+        head_lr_mult=args.head_lr_mult,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+        nesterov=args.nesterov,
+        patience=args.patience,
+    )
+
+    ckpt = models.checkpoint_path(args.z_bin, args.init_from, root)
+    # This package lives in the fork; the analysis repo is whatever encloses
+    # it (or the cwd, when the fork is checked out standalone).
+    fork_root = enclosing_repo(Path(__file__))
+    repo_root = enclosing_repo(fork_root.parent) if fork_root else None
+    if repo_root is None:
+        repo_root = enclosing_repo(Path.cwd())
+    fork_sha, fork_branch = git_describe(fork_root or Path.cwd())
+    repo_sha, repo_branch = git_describe(repo_root or Path.cwd())
+    write_config(
+        resolved["config_json"],
+        args,
+        {
+            "resolved_cutout_size": cutout_size,
+            "split_sizes": sizes,
+            "split_slug": split_manifest["slug"],
+            "split_hashes": split_manifest["hashes"],
+            "scaler_mean": list(scaler.mean_),
+            "scaler_scale": list(scaler.scale_),
+            "target_columns": TARGET_COLUMNS,
+            "checkpoint_path": str(ckpt) if ckpt else None,
+            "checkpoint_report": report,
+            "cache_pixel_zp": manifest.get("pixel_zp"),
+            "cache_crop_px": manifest.get("crop_px"),
+            "device": device,
+            "figures_dir": str(resolved["figures_dir"]),
+            "repo_git_sha": repo_sha,
+            "repo_git_branch": repo_branch,
+            "fork_git_sha": fork_sha,
+            "fork_git_branch": fork_branch,
+            **net_info,
+        },
+    )
+
+    if args.mlflow:
+        os.environ.setdefault(
+            "MLFLOW_TRACKING_URI",
+            f"sqlite:///{resolved['run_dir'] / 'mlflow.db'}",
         )
 
-        # Run trainer and save model state
-        trainer.run(loaders["train"], max_epochs=args["epochs"])
-        slug = (
-            f"{args['experiment_name']}-{args['split_slug']}-"
-            f"{mlflow.active_run().info.run_id}"
-        )
-        model_path = save_trained_model(model, slug)
-        logging.info("Saved model to {}".format(model_path))
+    trainer, _evaluator = create_trainer(
+        net,
+        optimizer,
+        criterion,
+        loaders,
+        device,
+        eval_splits=("train", "devel"),
+        eval_train=True,
+        train_eval_loader=train_eval_loader,
+        train_eval_every=args.train_eval_every,
+        checkpoint_dir=resolved["run_dir"],
+        patience=args.patience,
+        lr_scheduler=scheduler,
+        metrics_csv=resolved["metrics_csv"],
+        log_file=resolved["train_log"],
+        target_names=TARGET_COLUMNS,
+        use_mlflow=args.mlflow,
+    )
 
-        # Log model as an artifact
-        mlflow.log_artifact(model_path)
+    log.info(
+        "training for up to %d epochs -> %s", args.epochs, resolved["run_dir"]
+    )
+    trainer.run(loaders["train"], max_epochs=args.epochs)
+    log.info(
+        "done: best devel loss %.4f at epoch %s",
+        trainer.state.best_devel_loss,
+        trainer.state.best_epoch,
+    )
 
-        # Visualize spatial transformation
-        if args["model_type"] != "vgg16":
-            if hasattr(model, "spatial_transform") or hasattr(
-                model.module, "spatial_transform"
-            ):
-                output_dir = Path("output") / slug
-                output_dir.mkdir(parents=True, exist_ok=True)
-                nrow = round(math.sqrt(args["batch_size"]))
-                visualize_spatial_transform(
-                    model,
-                    loaders["devel"],
-                    output_dir,
-                    device=args["device"],
-                    nrow=nrow,
-                )
+    if not args.no_figures:
+        try:
+            from ggt.visualization import training_figures
 
-                # Log output directory as an artifact
-                mlflow.log_artifacts(output_dir)
+            training_figures.make_all(
+                resolved["run_dir"], resolved["figures_dir"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("figures failed (%s); run_dir is still complete", exc)
+
+    return resolved["run_dir"]
+
+
+# --- CLI ---------------------------------------------------------------------
+
+
+def parse_pixel_zp(value):
+    if value is None or str(value).lower() in ("none", "", "null"):
+        return None
+    return float(value)
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        description="Fine-tune GaMPEN on one (z_bin, band) Euclid dataset."
+    )
+    p.add_argument("--z-bin", type=int, required=True)
+    p.add_argument("--band", required=True, choices=euclid.BANDS)
+    p.add_argument("--run-name", required=True)
+    p.add_argument("--data-root", default=None)
+    p.add_argument("--seed", type=int, default=42)
+
+    p.add_argument(
+        "--cutout-size",
+        type=int,
+        default=None,
+        help="defaults to the bin's target_crop_px",
+    )
+    p.add_argument(
+        "--pixel-zp",
+        type=parse_pixel_zp,
+        default=None,
+        help="'none' or a zeropoint; must match the cache",
+    )
+    p.add_argument("--channels", type=int, default=3)
+    p.add_argument("--repeat-dims", action="store_true", default=True)
+    p.add_argument(
+        "--no-repeat-dims", dest="repeat_dims", action="store_false"
+    )
+    p.add_argument("--normalize", action="store_true", default=True)
+    p.add_argument("--no-normalize", dest="normalize", action="store_false")
+    p.add_argument("--transform", action="store_true", default=True)
+    p.add_argument("--no-transform", dest="transform", action="store_false")
+
+    p.add_argument(
+        "--init-from", default="real", choices=("real", "sim", "scratch")
+    )
+    p.add_argument(
+        "--freeze", default="vgg_features_early", choices=models.FREEZE_SPECS
+    )
+    p.add_argument("--allow-broad-reinit", action="store_true")
+    p.add_argument("--head-lr-mult", type=float, default=10.0)
+
+    p.add_argument("--lr", type=float, default=5e-7)
+    p.add_argument("--momentum", type=float, default=0.99)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--nesterov", action="store_true", default=False)
+    p.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="defaults to the checkpoint's published rate",
+    )
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--patience", type=int, default=25)
+    p.add_argument("--expand-data", type=int, default=4)
+    p.add_argument("--n-workers", type=int, default=8)
+    p.add_argument("--train-eval-every", type=int, default=1)
+
+    p.add_argument("--force-resplit", action="store_true")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="truncate every split (overfit / smoke tests)",
+    )
+    p.add_argument("--mlflow", action="store_true")
+    p.add_argument("--no-figures", action="store_true")
+    p.add_argument(
+        "--figures-dir",
+        default=None,
+        help="where training_eval_figs go; defaults to "
+        "$EUCLID_GAMPEN_FIGURES_ROOT/training/<run>",
+    )
+    return p
+
+
+def main(argv=None):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(message)s",
+        stream=sys.stdout,
+    )
+    args = build_parser().parse_args(argv)
+    run(args)
+    return 0
 
 
 if __name__ == "__main__":
-    log_fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    logging.basicConfig(level=logging.INFO, format=log_fmt)
-
-    train()
+    raise SystemExit(main())

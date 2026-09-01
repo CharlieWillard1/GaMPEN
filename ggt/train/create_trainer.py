@@ -63,7 +63,7 @@ def metrics_row(epoch, lr, wall_seconds, train, devel, target_names):
         per_target = (m or {}).get("elementwise_mae") or []
         for name, value in zip(target_names, per_target):
             row[f"{prefix}_mae_{name}"] = value
-        for name in target_names[len(per_target):]:
+        for name in target_names[len(per_target) :]:
             row[f"{prefix}_mae_{name}"] = None
     return row
 

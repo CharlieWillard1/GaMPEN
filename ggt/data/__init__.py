@@ -1,4 +1,5 @@
 from .dataset import FITSDataset
+from .crop import crop_center
 
 from torch.utils.data import DataLoader
 
@@ -9,4 +10,4 @@ def get_data_loader(dataset, batch_size, n_workers, shuffle=True):
     )
 
 
-__all__ = ["FITSDataset", "get_data_loader"]
+__all__ = ["FITSDataset", "get_data_loader", "crop_center"]
