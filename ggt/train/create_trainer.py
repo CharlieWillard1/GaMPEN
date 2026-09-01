@@ -1,4 +1,5 @@
 import csv
+import logging
 import os
 import time
 from datetime import datetime
@@ -197,6 +198,12 @@ def create_trainer(
     if checkpoint_dir is not None:
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # A run killed mid-write leaves its partial file behind. These are
+        # full-sized -- 643 MB for a 400 px model -- so sweep them rather
+        # than letting each crash cost another checkpoint's worth of disk.
+        for stale in checkpoint_dir.glob("*.pt.tmp"):
+            stale.unlink()
+            logging.warning("removed stale partial checkpoint %s", stale)
 
     if target_names is None:
         target_names = []
