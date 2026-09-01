@@ -175,9 +175,7 @@ def main(argv=None) -> int:
         "CACHE_NPY": cache_path(args.z_bin, root),
         "RUN_DIR": run_dir(args.z_bin, args.band, args.run_name, root),
         "LOG_DIR": log_dir(args.z_bin, args.band, root),
-        "FIGURES_DIR": figures_dir(
-            args.z_bin, args.band, args.run_name, root
-        ),
+        "FIGURES_DIR": figures_dir(args.z_bin, args.band, args.run_name, root),
     }
     for key, value in values.items():
         print(f'{key}="{value}"')

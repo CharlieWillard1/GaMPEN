@@ -108,11 +108,7 @@ def resolve(z_bin, band, run_name, root=None, figures_dir=None):
         )
 
     run = layout.ensure(layout.run_dir(z_bin, band, run_name, root))
-    figs = (
-        Path(figures_dir)
-        if figures_dir
-        else run / "training_eval_figs"
-    )
+    figs = Path(figures_dir) if figures_dir else run / "training_eval_figs"
     return {
         "info_csv": info,
         "band_dir": layout.band_dir(z_bin, band, root),
@@ -631,6 +627,8 @@ def parse_pixel_zp(value):
     if value is None or str(value).lower() in ("none", "", "null"):
         return None
     return float(value)
+
+
 # --- CLI ---------------------------------------------------------------
 
 

@@ -29,6 +29,7 @@ needs_info = pytest.mark.skipif(
 
 # --- target order ------------------------------------------------------------
 
+
 def test_target_order_matches_pretrained_head():
     """The output head's order is fixed by the HSC checkpoint."""
     assert train.TARGET_COLUMNS == [
@@ -42,10 +43,11 @@ def test_target_order_matches_pretrained_head():
 def test_n_out_matches_aleatoric_cov():
     """aleatoric_cov needs (3n + n^2)/2 outputs for n targets."""
     n = len(train.TARGET_COLUMNS)
-    assert int((3 * n + n ** 2) / 2) == 9
+    assert int((3 * n + n**2) / 2) == 9
 
 
 # --- the pixel-zeropoint guard -----------------------------------------------
+
 
 def _write_manifest(tmp_path, pixel_zp):
     bin_dir = tmp_path / "gampen_data" / config.bin_dirname(Z_BIN)
@@ -88,6 +90,7 @@ def test_parse_pixel_zp():
 
 # --- missing data fails with a usable message --------------------------------
 
+
 def test_resolve_names_the_build_commands(tmp_path):
     with pytest.raises(SystemExit) as exc:
         train.resolve(Z_BIN, BAND, "run", root=tmp_path)
@@ -101,6 +104,7 @@ def test_resolve_rejects_an_unknown_band(tmp_path):
 
 
 # --- CLI defaults hold the values the plan settled on ------------------------
+
 
 def _cli_params():
     return {p.name: p for p in train.main.params}
@@ -134,6 +138,7 @@ def test_required_cli_options():
 
 # --- checkpoint surgery ------------------------------------------------------
 
+
 @pytest.mark.skipif(
     not config.CHECKPOINT_FILE
     or not (layout.pretrained_dir() / "g_0_025").exists(),
@@ -154,6 +159,7 @@ def test_only_fc_loc_0_weight_is_reinitialised():
 
 
 # --- freezing and parameter groups -------------------------------------------
+
 
 def test_freeze_reduces_the_trainable_count():
     net = model.build_model(cutout_size=96, n_out=9, channels=3)
@@ -183,9 +189,7 @@ def test_frozen_parameters_stay_out_of_the_optimizer():
     net = model.build_model(cutout_size=96, n_out=9, channels=3)
     model.apply_freeze(net, "all_but_head")
     optimizer, _, _ = train.build_optimizer(net, lr=5e-7)
-    in_optimizer = {
-        id(p) for g in optimizer.param_groups for p in g["params"]
-    }
+    in_optimizer = {id(p) for g in optimizer.param_groups for p in g["params"]}
     for _, param in net.named_parameters():
         if not param.requires_grad:
             assert id(param) not in in_optimizer
@@ -193,14 +197,20 @@ def test_frozen_parameters_stay_out_of_the_optimizer():
 
 # --- the metrics.csv contract ------------------------------------------------
 
+
 def test_metrics_csv_columns_are_the_agreed_fifteen():
     from ggt.train.create_trainer import metrics_fieldnames
 
     assert metrics_fieldnames(train.TARGET_COLUMNS) == [
-        "epoch", "lr", "wall_seconds",
-        "train_loss", "devel_loss",
-        "train_mae", "devel_mae",
-        "train_mse", "devel_mse",
+        "epoch",
+        "lr",
+        "wall_seconds",
+        "train_loss",
+        "devel_loss",
+        "train_mae",
+        "devel_mae",
+        "train_mse",
+        "devel_mse",
         "train_mae_custom_logit_bt",
         "train_mae_ln_R_e_asec",
         "train_mae_ln_total_flux_adus",
@@ -214,8 +224,12 @@ def test_metrics_row_tolerates_a_skipped_train_evaluation():
     """With --train-eval-every N, train columns are empty elsewhere."""
     from ggt.train.create_trainer import metrics_row
 
-    devel = {"loss": 1.0, "mae": 2.0, "mse": 3.0,
-             "elementwise_mae": [0.1, 0.2, 0.3]}
+    devel = {
+        "loss": 1.0,
+        "mae": 2.0,
+        "mse": 3.0,
+        "elementwise_mae": [0.1, 0.2, 0.3],
+    }
     row = metrics_row(7, 5e-7, 12.0, None, devel, train.TARGET_COLUMNS)
     assert row["epoch"] == 7
     assert row["train_loss"] is None
@@ -252,12 +266,19 @@ def test_stale_partial_checkpoints_are_swept(tmp_path):
     keep.write_bytes(b"real")
 
     ds = TensorDataset(torch.randn(4, 3), torch.randn(4, 1))
-    loaders = {"train": DataLoader(ds, batch_size=2),
-               "devel": DataLoader(ds, batch_size=2)}
+    loaders = {
+        "train": DataLoader(ds, batch_size=2),
+        "devel": DataLoader(ds, batch_size=2),
+    }
     net = nn.Linear(3, 1)
     create_trainer(
-        net, torch.optim.SGD(net.parameters(), lr=0.0), nn.MSELoss(),
-        loaders, "cpu", checkpoint_dir=tmp_path, use_mlflow=False,
+        net,
+        torch.optim.SGD(net.parameters(), lr=0.0),
+        nn.MSELoss(),
+        loaders,
+        "cpu",
+        checkpoint_dir=tmp_path,
+        use_mlflow=False,
     )
 
     assert not stale.exists(), "stale .pt.tmp was not swept"
@@ -265,6 +286,7 @@ def test_stale_partial_checkpoints_are_swept(tmp_path):
 
 
 # --- real-data checks --------------------------------------------------------
+
 
 def test_reuse_rejects_a_split_that_predates_a_rebuilt_info_csv(tmp_path):
     """A stale split hashes fine against itself and is completely wrong.
@@ -280,13 +302,15 @@ def test_reuse_rejects_a_split_that_predates_a_rebuilt_info_csv(tmp_path):
 
     def frame(ids):
         n = len(ids)
-        return pd.DataFrame({
-            "object_id": ids,
-            "bt": np.linspace(0.1, 0.9, n),
-            "custom_logit_bt": np.linspace(-1, 1, n),
-            "ln_R_e_asec": np.linspace(-1, 1, n),
-            "ln_total_flux_adus": np.linspace(5, 7, n),
-        })
+        return pd.DataFrame(
+            {
+                "object_id": ids,
+                "bt": np.linspace(0.1, 0.9, n),
+                "custom_logit_bt": np.linspace(-1, 1, n),
+                "ln_R_e_asec": np.linspace(-1, 1, n),
+                "ln_total_flux_adus": np.linspace(5, 7, n),
+            }
+        )
 
     # A split built when info.csv held ids 0..19.
     frame(list(range(20))).to_csv(band_dir / "info.csv", index=False)
