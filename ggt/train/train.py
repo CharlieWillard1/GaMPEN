@@ -289,7 +289,7 @@ def train(**kwargs):
             mlflow.log_param(k, v)
 
         # Set up trainer
-        trainer = create_trainer(
+        trainer, _evaluator = create_trainer(
             model, optimizer, criterion, loaders, args["device"]
         )
 
