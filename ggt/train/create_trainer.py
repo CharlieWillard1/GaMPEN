@@ -110,6 +110,7 @@ def create_trainer(
     log_file=None,
     target_names=None,
     use_mlflow=True,
+    output_transform=None,
 ):
     """Set up Ignite trainer and evaluator.
 
@@ -155,6 +156,11 @@ def create_trainer(
     target_names : sequence of str, optional
         Names for the per-target `elementwise_mae` columns. Defaults to
         positional indices.
+    output_transform : callable, optional
+        Maps `(y_pred, y)` to the form the metrics expect. Defaults to a
+        dispatch on the loss type, which assumes the model predicts every
+        target. Supply one explicitly when training on a subset of the
+        head's outputs, where "the first n columns" is the wrong slice.
     use_mlflow : bool
         Log to MLflow as well. On MLflow 3.x the default `file://` store
         silently records nothing -- no `meta.yaml`, no metrics, no params,
@@ -171,14 +177,15 @@ def create_trainer(
         model, optimizer, criterion, device=device
     )
 
-    if isinstance(criterion, AleatoricLoss):
-        output_transform = metric_output_transform_al_loss
-    elif isinstance(criterion, AleatoricCovLoss):
-        output_transform = metric_output_transform_al_cov_loss
-    else:
+    if output_transform is None:
+        if isinstance(criterion, AleatoricLoss):
+            output_transform = metric_output_transform_al_loss
+        elif isinstance(criterion, AleatoricCovLoss):
+            output_transform = metric_output_transform_al_cov_loss
+        else:
 
-        def output_transform(x):
-            return x
+            def output_transform(x):
+                return x
 
     metrics = {
         "mae": MeanAbsoluteError(output_transform=output_transform),

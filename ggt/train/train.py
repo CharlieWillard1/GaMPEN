@@ -39,8 +39,93 @@ from ggt.surveys import euclid
 
 log = logging.getLogger(__name__)
 
-# The pretrained head's output order.  Never permute.
+# The survey's full target list, in the pretrained head's output order.
+# Never permute: the order is baked into the published checkpoints.
 TARGET_COLUMNS = list(euclid.TARGET_COLUMNS)
+
+
+def target_indices(subset):
+    """Positions of `subset` within the survey's full target list."""
+    missing = [t for t in subset if t not in TARGET_COLUMNS]
+    if missing:
+        raise SystemExit(
+            f"unknown target(s) {missing}; expected from {TARGET_COLUMNS}"
+        )
+    return [TARGET_COLUMNS.index(t) for t in subset]
+
+
+class ColumnSubsetScaler:
+    """A fitted scaler restricted to some of its columns.
+
+    The scaler is fitted once on the full target set and shared by every
+    run, so a subset run must not refit it -- that would change the
+    normalisation and make the runs incomparable. This just selects the
+    relevant means and scales.
+    """
+
+    def __init__(self, scaler, idx):
+        self.mean_ = np.asarray(scaler.mean_)[idx]
+        self.scale_ = np.asarray(scaler.scale_)[idx]
+
+    def transform(self, X):
+        return (np.asarray(X, dtype=float) - self.mean_) / self.scale_
+
+    def inverse_transform(self, X):
+        return np.asarray(X, dtype=float) * self.scale_ + self.mean_
+
+
+class TargetSubsetLoss:
+    """Aleatoric covariance loss over a subset of the head's outputs.
+
+    The head keeps all `(3n + n^2)/2` outputs for the survey's full target
+    list, so a checkpoint stays interchangeable between subset and full
+    runs. This picks the columns belonging to `subset` -- the means, their
+    log-variances, and any covariance entries between two selected targets
+    -- and hands that slice to the real loss.
+
+    Outputs not selected receive exactly zero gradient and stay at their
+    incoming values, which is what makes a subset run usable as a seed.
+    """
+
+    def __init__(self, subset, n_total=None):
+        import torch
+
+        from ggt.losses import AleatoricCovLoss
+
+        n_total = n_total or len(TARGET_COLUMNS)
+        idx = target_indices(subset)
+        k = len(idx)
+
+        means = list(idx)
+        logvars = [n_total + i for i in idx]
+        tri = torch.tril_indices(n_total, n_total, -1).T.tolist()
+        covs = [
+            2 * n_total + pos
+            for pos, (i, j) in enumerate(tri)
+            if i in idx and j in idx
+        ]
+        self.cols = means + logvars + covs
+        self.mean_cols = means  # where this subset's means live
+        self.inner = AleatoricCovLoss(num_var=k, average=True)
+        log.info(
+            "loss on %d of %d targets %s -> head columns %s",
+            k,
+            n_total,
+            list(subset),
+            self.cols,
+        )
+
+    def __call__(self, outputs, targets):
+        return self.inner(outputs[..., self.cols], targets)
+
+    def to(self, *a, **kw):
+        return self
+
+    def eval(self):
+        return self
+
+    def train(self, mode=True):
+        return self
 
 
 # --- provenance --------------------------------------------------------------
@@ -215,6 +300,7 @@ def build_loaders(
     z_bin,
     band,
     scaler,
+    targets=None,
     seed=42,
     cutout_size=None,
     channels=3,
@@ -257,7 +343,7 @@ def build_loaders(
             split=split,
             slug=slug,
             root=root,
-            target_metrics=TARGET_COLUMNS,
+            target_metrics=list(targets or TARGET_COLUMNS),
             cutout_size=cutout_size,
             channels=channels,
             repeat_dims=repeat_dims,
@@ -333,7 +419,11 @@ def build_net(
     import torch
     import torch.nn as nn
 
-    n_out = int((3 * len(TARGET_COLUMNS) + len(TARGET_COLUMNS) ** 2) / 2)
+    # Fixed by the survey's full target list, never by the training
+    # subset: the head keeps every output so that a subset run's
+    # checkpoint remains a valid seed for a full run.
+    n_all = len(TARGET_COLUMNS)
+    n_out = int((3 * n_all + n_all**2) / 2)
     if dropout is None:
         dropout = models.default_dropout(z_bin, init_from)
 
@@ -413,6 +503,7 @@ def build_optimizer(
     weight_decay=1e-4,
     nesterov=False,
     patience=25,
+    targets=None,
 ):
     """SGD with a faster head, the aleatoric covariance loss, and a schedule.
 
@@ -422,7 +513,6 @@ def build_optimizer(
     """
     import torch
     import torch.optim as opt
-    from ggt.losses import AleatoricCovLoss
 
     head, backbone = [], []
     for name, param in net.named_parameters():
@@ -451,7 +541,7 @@ def build_optimizer(
         lr * head_lr_mult,
     )
 
-    criterion = AleatoricCovLoss(num_var=len(TARGET_COLUMNS), average=True)
+    criterion = TargetSubsetLoss(list(targets or TARGET_COLUMNS))
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         factor=0.3,
@@ -498,6 +588,18 @@ def run(args):
     )
     manifest = check_pixel_zp(args.z_bin, args.pixel_zp, root)
 
+    targets = [t.strip() for t in args.target_metrics.split(",") if t.strip()]
+    idx = target_indices(targets)
+    if targets != TARGET_COLUMNS:
+        log.info(
+            "training on %d of %d targets: %s (head keeps all %d outputs, "
+            "so this checkpoint still seeds a full run)",
+            len(targets),
+            len(TARGET_COLUMNS),
+            targets,
+            int((3 * len(TARGET_COLUMNS) + len(TARGET_COLUMNS) ** 2) / 2),
+        )
+
     split_manifest, scaler = prepare_split(
         args.z_bin,
         args.band,
@@ -506,10 +608,14 @@ def run(args):
         root=root,
     )
 
+    if targets != TARGET_COLUMNS:
+        scaler = ColumnSubsetScaler(scaler, idx)
+
     loaders, train_eval_loader, sizes, cutout_size = build_loaders(
         args.z_bin,
         args.band,
         scaler,
+        targets=targets,
         seed=args.seed,
         cutout_size=args.cutout_size,
         channels=args.channels,
@@ -543,6 +649,7 @@ def run(args):
         weight_decay=args.weight_decay,
         nesterov=args.nesterov,
         patience=args.patience,
+        targets=targets,
     )
 
     ckpt = models.checkpoint_path(args.z_bin, args.init_from, root)
@@ -564,7 +671,8 @@ def run(args):
             "split_hashes": split_manifest["hashes"],
             "scaler_mean": list(scaler.mean_),
             "scaler_scale": list(scaler.scale_),
-            "target_columns": TARGET_COLUMNS,
+            "target_columns": targets,
+            "survey_target_columns": TARGET_COLUMNS,
             "checkpoint_path": str(ckpt) if ckpt else None,
             "checkpoint_report": report,
             "cache_pixel_zp": manifest.get("pixel_zp"),
@@ -585,6 +693,10 @@ def run(args):
             f"sqlite:///{resolved['run_dir'] / 'mlflow.db'}",
         )
 
+    def subset_metric_transform(output):
+        y_pred, y = output
+        return y_pred[..., criterion.mean_cols], y
+
     trainer, _evaluator = create_trainer(
         net,
         optimizer,
@@ -600,8 +712,9 @@ def run(args):
         lr_scheduler=scheduler,
         metrics_csv=resolved["metrics_csv"],
         log_file=resolved["train_log"],
-        target_names=TARGET_COLUMNS,
+        target_names=targets,
         use_mlflow=args.mlflow,
+        output_transform=subset_metric_transform,
     )
 
     log.info(
@@ -662,6 +775,14 @@ def parse_pixel_zp(value):
     default="none",
     help="'none' for native survey units, or a zeropoint. MUST match how "
     "the cache was built; the run refuses to start otherwise.",
+)
+@click.option(
+    "--target-metrics",
+    type=str,
+    default=",".join(TARGET_COLUMNS),
+    help="Comma-separated subset of the survey's targets to train on. "
+    "The head keeps all of the survey's outputs regardless, so a subset "
+    "run's checkpoint is still a valid seed for a full run.",
 )
 @click.option("--channels", type=int, default=3)
 @click.option("--repeat-dims/--no-repeat-dims", default=True)
