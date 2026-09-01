@@ -102,26 +102,34 @@ def test_resolve_rejects_an_unknown_band(tmp_path):
 
 # --- CLI defaults hold the values the plan settled on ------------------------
 
+def _cli_params():
+    return {p.name: p for p in train.main.params}
+
+
 def test_cli_defaults():
-    args = train.build_parser().parse_args(
-        ["--z-bin", "0", "--band", "VIS", "--run-name", "r"]
-    )
-    assert args.lr == 5e-7          # >1e-6 diverges on aleatoric_cov
-    assert args.freeze == "vgg_features_early"
-    assert args.momentum == 0.99
-    assert args.weight_decay == 1e-4
-    assert args.batch_size == 16
-    assert args.patience == 25
-    assert args.expand_data == 4
-    assert args.head_lr_mult == 10.0
-    assert args.init_from == "real"
-    assert args.transform is True
+    d = {name: p.default for name, p in _cli_params().items()}
+    assert d["lr"] == 5e-7  # >1e-6 diverges on aleatoric_cov
+    assert d["freeze"] == "vgg_features_early"
+    assert d["momentum"] == 0.99
+    assert d["weight_decay"] == 1e-4
+    assert d["batch_size"] == 16
+    assert d["patience"] == 25
+    assert d["expand_data"] == 4
+    assert d["head_lr_mult"] == 10.0
+    assert d["init_from"] == "real"
+    assert d["transform"] is True
+    assert d["pixel_zp"] == "none"
 
 
 def test_freeze_choices_come_from_the_model_module():
-    parser = train.build_parser()
-    action = next(a for a in parser._actions if a.dest == "freeze")
-    assert tuple(action.choices) == model.FREEZE_SPECS
+    opt = _cli_params()["freeze"]
+    assert tuple(opt.type.choices) == model.FREEZE_SPECS
+
+
+def test_required_cli_options():
+    """A run must always name its bin, band and run directory."""
+    required = {n for n, p in _cli_params().items() if p.required}
+    assert required == {"z_bin", "band", "run_name"}
 
 
 # --- checkpoint surgery ------------------------------------------------------
@@ -203,7 +211,7 @@ def test_metrics_csv_columns_are_the_agreed_fifteen():
 
 
 def test_metrics_row_tolerates_a_skipped_train_evaluation():
-    """With --train-eval-every N the train columns are empty on other epochs."""
+    """With --train-eval-every N, train columns are empty elsewhere."""
     from ggt.train.create_trainer import metrics_row
 
     devel = {"loss": 1.0, "mae": 2.0, "mse": 3.0,
@@ -267,7 +275,6 @@ def test_reuse_rejects_a_split_that_predates_a_rebuilt_info_csv(tmp_path):
     """
     import pandas as pd
 
-
     band_dir = tmp_path / "gampen_data" / config.bin_dirname(Z_BIN) / BAND
     (band_dir / "splits").mkdir(parents=True)
 
@@ -284,7 +291,9 @@ def test_reuse_rejects_a_split_that_predates_a_rebuilt_info_csv(tmp_path):
     # A split built when info.csv held ids 0..19.
     frame(list(range(20))).to_csv(band_dir / "info.csv", index=False)
     splits.build(Z_BIN, BAND, seed=42, root=tmp_path)
-    assert splits.build(Z_BIN, BAND, seed=42, root=tmp_path), "reuse should work"
+    assert splits.build(
+        Z_BIN, BAND, seed=42, root=tmp_path
+    ), "reuse should work"
 
     # info.csv is rebuilt with different sources; the split is now stale.
     frame(list(range(100, 160))).to_csv(band_dir / "info.csv", index=False)

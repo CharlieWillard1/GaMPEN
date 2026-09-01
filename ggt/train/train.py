@@ -21,7 +21,6 @@ rebuild the identical datasets and model without training anything.
 
 from __future__ import annotations
 
-import argparse
 import copy
 import json
 import logging
@@ -29,7 +28,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import click
 import numpy as np
 
 from ggt.data import cache_dataset, layout, splits
@@ -626,94 +627,130 @@ def parse_pixel_zp(value):
     if value is None or str(value).lower() in ("none", "", "null"):
         return None
     return float(value)
+# --- CLI ---------------------------------------------------------------
 
 
-def build_parser():
-    p = argparse.ArgumentParser(
-        description="Fine-tune GaMPEN on one (z_bin, band) Euclid dataset."
-    )
-    p.add_argument("--z-bin", type=int, required=True)
-    p.add_argument("--band", required=True, choices=euclid.BANDS)
-    p.add_argument("--run-name", required=True)
-    p.add_argument("--data-root", default=None)
-    p.add_argument("--seed", type=int, default=42)
-
-    p.add_argument(
-        "--cutout-size",
-        type=int,
-        default=None,
-        help="defaults to the bin's target_crop_px",
-    )
-    p.add_argument(
-        "--pixel-zp",
-        type=parse_pixel_zp,
-        default=None,
-        help="'none' or a zeropoint; must match the cache",
-    )
-    p.add_argument("--channels", type=int, default=3)
-    p.add_argument("--repeat-dims", action="store_true", default=True)
-    p.add_argument(
-        "--no-repeat-dims", dest="repeat_dims", action="store_false"
-    )
-    p.add_argument("--normalize", action="store_true", default=True)
-    p.add_argument("--no-normalize", dest="normalize", action="store_false")
-    p.add_argument("--transform", action="store_true", default=True)
-    p.add_argument("--no-transform", dest="transform", action="store_false")
-
-    p.add_argument(
-        "--init-from", default="real", choices=("real", "sim", "scratch")
-    )
-    p.add_argument(
-        "--freeze", default="vgg_features_early", choices=models.FREEZE_SPECS
-    )
-    p.add_argument("--allow-broad-reinit", action="store_true")
-    p.add_argument("--head-lr-mult", type=float, default=10.0)
-
-    p.add_argument("--lr", type=float, default=5e-7)
-    p.add_argument("--momentum", type=float, default=0.99)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--nesterov", action="store_true", default=False)
-    p.add_argument(
-        "--dropout",
-        type=float,
-        default=None,
-        help="defaults to the checkpoint's published rate",
-    )
-    p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--patience", type=int, default=25)
-    p.add_argument("--expand-data", type=int, default=4)
-    p.add_argument("--n-workers", type=int, default=8)
-    p.add_argument("--train-eval-every", type=int, default=1)
-
-    p.add_argument("--force-resplit", action="store_true")
-    p.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="truncate every split (overfit / smoke tests)",
-    )
-    p.add_argument("--mlflow", action="store_true")
-    p.add_argument("--no-figures", action="store_true")
-    p.add_argument(
-        "--figures-dir",
-        default=None,
-        help="where training_eval_figs go; defaults to "
-        "$EUCLID_GAMPEN_FIGURES_ROOT/training/<run>",
-    )
-    return p
-
-
-def main(argv=None):
+@click.command()
+@click.option("--z-bin", type=int, required=True)
+@click.option(
+    "--band",
+    type=click.Choice(euclid.BANDS, case_sensitive=False),
+    required=True,
+)
+@click.option("--run-name", type=str, required=True)
+@click.option("--data-root", type=str, default=None)
+@click.option("--seed", type=int, default=42)
+@click.option(
+    "--cutout-size",
+    type=int,
+    default=None,
+    help="Side of the image the network sees. Defaults to the bin's "
+    "target_crop_px; must not exceed the cache's crop_px.",
+)
+@click.option(
+    "--pixel-zp",
+    type=str,
+    default="none",
+    help="'none' for native survey units, or a zeropoint. MUST match how "
+    "the cache was built; the run refuses to start otherwise.",
+)
+@click.option("--channels", type=int, default=3)
+@click.option("--repeat-dims/--no-repeat-dims", default=True)
+@click.option("--normalize/--no-normalize", default=True)
+@click.option(
+    "--transform/--no-transform",
+    default=True,
+    help="Augment the train split with flips and rotations.",
+)
+@click.option(
+    "--init-from",
+    type=click.Choice(["real", "sim", "scratch"], case_sensitive=False),
+    default="real",
+    help="Which published checkpoint family to start from.",
+)
+@click.option(
+    "--freeze",
+    type=click.Choice(list(models.FREEZE_SPECS), case_sensitive=False),
+    default="vgg_features_early",
+)
+@click.option(
+    "--allow-broad-reinit",
+    is_flag=True,
+    default=False,
+    help="Permit tensors other than fc_loc.0.weight to be re-initialised. "
+    "Almost always a mistake: it means the transfer is not doing what you "
+    "think it is.",
+)
+@click.option(
+    "--head-lr-mult",
+    type=float,
+    default=10.0,
+    help="LR multiplier for fc_loc.0 and the classifier.",
+)
+@click.option(
+    "--lr",
+    type=float,
+    default=5e-7,
+    help="Backbone learning rate. aleatoric_cov exponentiates its variance "
+    "terms; anything above ~1e-6 is liable to diverge.",
+)
+@click.option("--momentum", type=float, default=0.99)
+@click.option("--weight-decay", type=float, default=1e-4)
+@click.option("--nesterov/--no-nesterov", default=False)
+@click.option(
+    "--dropout",
+    type=float,
+    default=None,
+    help="Defaults to the checkpoint's published rate.",
+)
+@click.option("--batch-size", type=int, default=16)
+@click.option("--epochs", type=int, default=200)
+@click.option(
+    "--patience",
+    type=int,
+    default=25,
+    help="Early-stopping patience. ReduceLROnPlateau uses a third of it.",
+)
+@click.option(
+    "--expand-data",
+    type=int,
+    default=4,
+    help="Augmentation factor, train split only.",
+)
+@click.option("--n-workers", type=int, default=8)
+@click.option("--train-eval-every", type=int, default=1)
+@click.option(
+    "--force-resplit",
+    is_flag=True,
+    default=False,
+    help="Refused on an existing seed; pick a new --seed instead.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Truncate every split. For overfit and smoke tests.",
+)
+@click.option("--mlflow", is_flag=True, default=False)
+@click.option("--no-figures", is_flag=True, default=False)
+@click.option(
+    "--figures-dir",
+    type=str,
+    default=None,
+    help="Where figures go; defaults to "
+    "$EUCLID_GAMPEN_FIGURES_ROOT/training/<run_name>.",
+)
+def main(**kwargs):
+    """Fine-tune a GaMPEN model on one (z_bin, band) dataset."""
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] %(message)s",
         stream=sys.stdout,
     )
-    args = build_parser().parse_args(argv)
-    run(args)
-    return 0
+    kwargs["pixel_zp"] = parse_pixel_zp(kwargs["pixel_zp"])
+    kwargs["band"] = kwargs["band"].upper()
+    run(SimpleNamespace(**kwargs))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
