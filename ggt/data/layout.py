@@ -23,11 +23,10 @@ The pixel cache is shared by all four bands and is deliberately
 *quality-cut agnostic*: cuts live only in each band's `info.csv`, so
 retuning a cut rewrites a small CSV instead of rebuilding tens of GB.
 
-**Outputs are split by size, not by kind.** A `best.pt`/`last.pt` pair is
-1.2 GB at cutout_size=400, so weights, metrics and logs go to the data
-volume beside the cache; figures are small and go in the analysis repo
-where you can actually look at them. Neither ever lands inside this
-package -- that would put gigabytes of checkpoints inside a git submodule.
+**Run outputs live on the data volume, never inside this package.** A
+`best.pt`/`last.pt` pair is 1.2 GB at cutout_size=400, and this package is
+a git submodule. Weights, metrics, logs and figures all sit together under
+`runs_root()`, so a run is one self-contained directory.
 """
 
 from __future__ import annotations
@@ -129,23 +128,14 @@ def log_dir(z_bin: int, band: str, root=None) -> Path:
     return logs_root(root) / euclid.bin_dirname(z_bin) / band
 
 
-def figures_root() -> Path:
-    """Where figures go: small, and wanted in the analysis repo.
+def figures_dir(z_bin: int, band: str, run_name: str, root=None) -> Path:
+    """A run's diagnostic figures, beside the run they describe.
 
-    This package must not hardcode a path into whatever repo contains it,
-    so resolution is: `EUCLID_GAMPEN_FIGURES_ROOT`, else `<cwd>/figures`.
-    The launcher scripts know their repo root and export the variable, so
-    from `train_zbin.sh` or `make_figs.sh` this is automatic. Callers may
-    also pass an explicit directory and bypass this entirely.
+    Keeping them in the run directory means a run is one self-contained
+    thing you can copy, archive or hand to someone else. Pass an explicit
+    directory to `make_all` to put them somewhere else.
     """
-    override = os.environ.get("EUCLID_GAMPEN_FIGURES_ROOT")
-    if override:
-        return Path(override)
-    return Path.cwd() / "figures"
-
-
-def figures_dir(run_name: str) -> Path:
-    return figures_root() / "training" / run_name
+    return run_dir(z_bin, band, run_name, root) / "training_eval_figs"
 
 
 def ensure(path: Path) -> Path:
@@ -185,7 +175,9 @@ def main(argv=None) -> int:
         "CACHE_NPY": cache_path(args.z_bin, root),
         "RUN_DIR": run_dir(args.z_bin, args.band, args.run_name, root),
         "LOG_DIR": log_dir(args.z_bin, args.band, root),
-        "FIGURES_DIR": figures_dir(args.run_name),
+        "FIGURES_DIR": figures_dir(
+            args.z_bin, args.band, args.run_name, root
+        ),
     }
     for key, value in values.items():
         print(f'{key}="{value}"')

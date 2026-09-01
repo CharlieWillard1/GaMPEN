@@ -61,9 +61,9 @@ print(torch.__version__)
 The core steps involved in running GaMPEN include :-
 
 1. Placing your data in a specific directory structure
-2. Using the `GaMPEN/ggt/data/make_splits.py` script to generate train/devel/test splits
+2. Using the `GaMPEN/ggt/data/splits.py` script to generate train/devel/test splits
 3. Using the `GaMPEN/ggt/train/train.py` script to train a GaMPEN model
-4. Using the MLFlow UI to monitor your model during and after training
+4. Reading `train.log` and `metrics.csv` in the run directory to monitor your model during and after training
 5. Using the `GaMPEN/ggt/modules/inference.py` script to perform predictions using the trained model.
 6. Using the `GaMPEN/ggt/modules/result_aggregator.py` script to aggregate the predictions into an easy-to-read pandas data-frame.
 
@@ -90,7 +90,7 @@ This should create a directory called `hsc` at the specified `demodir` path with
 
 Now, let's split the data into train, devel, and test sets. To do this, run
 ```bash
-python ./ggt/data/make_splits.py --data_dir=./../hsc/ --target_metric='bt'
+python -m ggt.data.splits --z-bin=0 --band=VIS --seed=42
 ```
 
 This will create another folder called `splits` within `hsc` with the different data-splits for training, devel (validation), and testing.
@@ -100,28 +100,26 @@ Let's use the data we just downloaded to train a GaMPEN model. To do this, we wi
 use the `train.py` script:-
 
 ```bash
-python ggt/train/train.py \
-  --experiment_name='demo' \
-  --data_dir='./../hsc/' \
-  --split_slug='balanced-dev2' \
-  --batch_size=16 \
+python -m ggt.train.train \
+  --z-bin=0 \
+  --band=VIS \
+  --run-name='demo' \
+  --pixel-zp=none \
+  --batch-size=16 \
   --epochs=2 \
   --lr=5e-7 \
   --momentum=0.99 \
-  --crop \
-  --cutout_size=239 \
-  --target_metrics='custom_logit_bt,ln_R_e_asec,ln_total_flux_adus' \
-  --repeat_dims \
-  --no-nesterov \
-  --label_scaling='std' \
-  --dropout_rate=0.0004 \
-  --loss='aleatoric_cov' \
-  --weight_decay=0.0001 \
-  --parallel
+  --weight-decay=0.0001 \
+  --dropout=0.0004 \
+  --freeze=vgg_features_early
 ```
+
+The dataset, its geometry and the pretrained checkpoint all follow from
+`--z-bin` and `--band`, so they are not passed separately. Progress goes to
+`train.log` in the run directory, one line per epoch.
 To list the all possible options along with explanations, head to the [Using GaMPEN](Using_GaMPEN.md) page or run
 ```bash
-python ggt/train/train.py --help
+python -m ggt.train.train --help
 ```
 
 ### Launching the MLFlow UI
@@ -195,13 +193,13 @@ There are also no limitations on additional columns being present in `info.csv`.
 4. Next, separate your dataset into train, devel, and test splits with the following command:-
 
 ```bash
-python ggt/data/make_splits.py --data_dir=/dataset-name/
+python -m ggt.data.splits --z-bin=0 --band=VIS --seed=42
 ```
 :::{attention}
 You should provide the full path of the `dataset-name` directory to the `data_dir` argument.
 :::
 
-The `make_splits.py` file splits the dataset according to a set of pre-determined fractions and you can choose to use any of these for your analysis. Details of the various splits are mentioned on the [Using GaMPEN](Using_GaMPEN.md#make-splits) page.
+`splits.py` partitions the dataset into train/devel/test and fits the label scaler, writing both under `splits/`. A split is created once and reused thereafter, and is verified against the current `info.csv` on every call. Details are on the [Using GaMPEN](Using_GaMPEN.md#make-splits) page.
 
 After generating the splits, the `dataset-name` directory should look like this:
 ```
@@ -212,7 +210,7 @@ After generating the splits, the `dataset-name` directory should look like this:
 ```
 
 :::{tip}
-To change the fractions (of train/devel/test data) in the various splits; alter the `split_types` dictionary in `make_splits.py`
+To change the fractions, pass `--train-frac`, `--devel-frac` and `--test-frac` (they must sum to 1)
 :::
 
 5. Follow the instructions in [Running the trainer](#running-the-trainer).

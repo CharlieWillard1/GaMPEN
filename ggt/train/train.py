@@ -86,9 +86,9 @@ def enclosing_repo(start):
 def resolve(z_bin, band, run_name, root=None, figures_dir=None):
     """Resolve every path this run touches, failing early if data is absent.
 
-    Weights and metrics land on the data volume (a `best.pt`/`last.pt` pair
-    is 1.2 GB); figures land in the analysis repo where they can be looked
-    at. See `ggt.data.layout` for how the two roots are found.
+    Everything a run produces -- weights, metrics, logs and figures --
+    lands together under the data volume's runs root, so a run is one
+    self-contained directory. See `ggt.data.layout`.
     """
     if band not in euclid.BANDS:
         raise SystemExit(
@@ -108,7 +108,11 @@ def resolve(z_bin, band, run_name, root=None, figures_dir=None):
         )
 
     run = layout.ensure(layout.run_dir(z_bin, band, run_name, root))
-    figs = Path(figures_dir) if figures_dir else layout.figures_dir(run_name)
+    figs = (
+        Path(figures_dir)
+        if figures_dir
+        else run / "training_eval_figs"
+    )
     return {
         "info_csv": info,
         "band_dir": layout.band_dir(z_bin, band, root),
@@ -737,8 +741,8 @@ def parse_pixel_zp(value):
     "--figures-dir",
     type=str,
     default=None,
-    help="Where figures go; defaults to "
-    "$EUCLID_GAMPEN_FIGURES_ROOT/training/<run_name>.",
+    help="Where figures go; defaults to training_eval_figs/ inside the "
+    "run directory.",
 )
 def main(**kwargs):
     """Fine-tune a GaMPEN model on one (z_bin, band) dataset."""

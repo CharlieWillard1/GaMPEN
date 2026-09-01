@@ -4,51 +4,79 @@ On this page, we go over the most important user-facing functions that GaMPEN ha
 
 ## Make Splits
 
-```{eval-rst}  
-:py:mod:`ggt.data.make_splits`
-==============================
+```{eval-rst}
+:py:mod:`ggt.data.splits`
+=========================
 
-.. py:module:: ggt.data.make_splits
+.. py:module:: ggt.data.splits
 
 
 Functions
 ~~~~~~~~~
 
-.. py:function:: main(data_dir, target_metric)
+.. py:function:: build(z_bin, band, seed=42, ...)
 
-   Generates train/devel/test splits from the dataset provided.
+   Create a seeded train/devel/test split and a fitted label scaler, or
+   verify and reuse the existing ones.
 
 ```
 
-This `GaMPEN/ggt/data/make_splits.py` script slices and dices the data in `info.csv` in a bunch of different ways to create a lot of options for training, testing, and devel (validation) sets. All these splits of the `info.csv` file are stored in a `splits/` folder within the parent `data_dir` directory.
+This `GaMPEN/ggt/data/splits.py` script partitions `info.csv` into
+`train`/`devel`/`test` and fits the label scaler, writing both into a
+`splits/` folder beside it.
 
-First, this will create two types of splits:- `balanced` and `unbalanced`. In the `unbalanced` splits, objects are picked randomly from the dataset for each split without any constraint. This function also creates `balanced` splits, where it first splits the dataset into 4 partitions based on the `target_metric` variable; and then draws samples such that the samples used for trianing are balanced across these 4 partitions. 
+**It replaces the earlier `make_splits.py`**, which generated fourteen slug
+variants on every invocation with a hardcoded `random_state=0`. The
+contract here is different in three ways that matter for reproducibility:
 
-Finally, for both `balanced` and `unbalanced` split, a number of different sub-splits are created with different fractions of data assigned to the training, devel, and test sets. The fractions assigned to each partition for the various types are mentioned below:-
+* **A split is created once and then reused.** On every later call the
+  split's manifest hash is verified and the existing files are loaded.
+  Regenerating one requires `--force-resplit` *and* a new `--seed`, so a
+  hyperparameter sweep cannot silently reshuffle the test set underneath a
+  series of runs.
+* **The split is checked against the current `info.csv`.** Hashes alone
+  only prove a CSV has not been hand-edited. Rebuilding `info.csv` -- a
+  retuned quality cut, or a move from a debug subset to production data --
+  leaves the previous split perfectly self-consistent and completely wrong,
+  so the union of its object ids must still equal the catalog's.
+* **The scaler is fitted once, on the train split only, and persisted** to
+  `splits/<slug>-scaler.joblib`, rather than being refitted invisibly on
+  every dataset construction.
 
- * **split_types** - 
-     * xs - train=0.027, devel=0.003, test=0.970
-     * sm - train=0.045, devel=0.005, test=0.950
-     * md - train=0.090, devel=0.010, test=0.900
-     * lg - train=0.200, devel=0.050, test=0.750
-     * xl - train=0.450, devel=0.050, test=0.500
-     * dev - train=0.70, devel=0.15, test=0.15
-     * dev2 - train=0.700, devel=0.050, test=0.250
+Balancing is retained: with `--balance-on` set, rows are partitioned into
+four quantile bins of that column and interleaved, so each split spans the
+full range of the balancing variable.
 
-You can change these or definte your own splits. Simply alter `split_types` dictionary at the top of the `GaMPEN/ggt/data/make_splits.py` file.
+Splits are named `<slug>-<split>.csv` where the slug is `euclid-<seed>`, so
+different seeds coexist and each stays independently verifiable.
 
 ### Parameters:
-* **data_dir** (*str*, required variable) - Path to the directory where the `info.csv` file is stored
+* **--z-bin** (*int*, required) - Redshift bin index.
 
-* **target_metric** (*str*, default=`"bt_g"`) - Used for creating the `balanced` splits. This is the name of the column in the `info.csv` file that you want to use for creating the `balanced` splits.
+* **--band** (*str*, required) - Which band's `info.csv` to split.
 
+* **--seed** (*int*, default=`42`) - Split seed; also names the slug.
+
+* **--train-frac / --devel-frac / --test-frac** (*float*, default=`0.70` /
+  `0.15` / `0.15`) - Must sum to 1.
+
+* **--balance-on** (*str*, default=`"bt"`) - Column used for quantile
+  balancing.
+
+* **--force-resplit** (*flag*) - Refused on an existing seed; choose a new
+  one instead.
+
+* **--out-root** (*str*, default=`None`) - Override the data root.
 
 
 ## Running the trainer
 
-The backbone of GaMPEN's training feature is the `GaMPEN/ggt/train/train.py`. This script is meant to be invoked from the command line while passing in the appropriate arguments. 
+`GaMPEN/ggt/train/train.py` is invoked from the command line and runs one
+fine-tune end to end: resolve paths, verify the pixel convention, create or
+reuse the split and scaler, build the datasets, load a pretrained
+checkpoint, train, and write the diagnostic figures.
 
-```{eval-rst}  
+```{eval-rst}
 
 :py:mod:`ggt.train.train`
 =========================
@@ -58,118 +86,104 @@ The backbone of GaMPEN's training feature is the `GaMPEN/ggt/train/train.py`. Th
 Functions
 ~~~~~~~~~
 
-.. py:function:: train(**kwargs)
+.. py:function:: main(**kwargs)
 
-   Trains GaMPEN models using passed arguments.
+   Fine-tune a model on one (z_bin, band) dataset.
+
+.. py:function:: run(args)
+
+   The same pipeline, callable from Python with an attribute-style object.
 
 ```
+
+Each stage is a separate importable function -- `resolve`,
+`check_pixel_zp`, `prepare_split`, `build_loaders`, `build_net`,
+`build_optimizer` -- so an analysis notebook can rebuild exactly the
+datasets and model a run used without training anything.
+
+`python -m ggt.train.train --help` is authoritative; the options below are
+the ones whose *meaning* is not obvious from the name.
+
 ### Parameters:
 
-* **experiment_name** (*str*; default=`"demo"`) - MLFlow variable which controls the name of the experiment in MLFlow.
+* **--z-bin** (*int*, required) - Redshift bin index. Selects the dataset,
+  the crop size, and which published checkpoint initialises the model.
 
-* **run_id** (*str*; default=`None`) - An MLFlow variable. This only needs to be used if you are resuming a previosuly run experiment, and want the information to be logged under the previous run.
+* **--band** (*str*, required) - Which band to train on.
 
-* **run_name** (*str*; default=`None`) - The name assigned to the MLFlow run. A run is supposed to be a sub-class of an experiment in MLFLow. Typically you will have multiple runs (e.g., using multiple hyper-parameters) within an experiment.
+* **--run-name** (*str*, required) - Names the run directory and the log.
 
-* **model_type** (*str*; default=`"vgg16_w_stn_oc_drp"`) - The type of model you want to train. For most purposes, if you are trying to use GaMPEN as it was originally used, you should use `vgg16_w_stn_oc_drp`. We recommend referring to the source [source code](https://github.com/aritraghsh09/GaMReN/blob/trial_network/ggt/models) for information about the other options.
-    * ~~ggt~~
-    * **vgg16** 
-    * ~~ggt_no_gconv~~
-    * **vgg16_w_stn**
-    * **vgg16_w_stn_drp**
-    * **vgg16_w_stn_drp_2**
-    * **vgg16_w_stn_at_drp**
-    * **vgg16_w_stn_oc_drp**
+* **--cutout-size** (*int*, default=`None`) - What the network sees.
+  Defaults to the bin's `target_crop_px`. May be smaller than the cache's
+  `crop_px` but never larger.
 
-    ```{note}
-    Although included in its initial release, the `ggt` and `ggt_no_gconv` models have been removed in recent versions of GaMPEN
-    ```
+* **--pixel-zp** (*str*, default=`"none"`) - The photometric convention the
+  pixels are on. **This is checked against the cache manifest and the run
+  refuses to start on a mismatch.** Training on differently-scaled pixels
+  than you believe produces a model that trains perfectly well and means
+  nothing.
 
-* **model_state** (*str*; default=`None`) - The path to a previosuly saved model file. This only needs to be set when you want to start training from a previously saved model.
+* **--init-from** (*str*, default=`"real"`) - `real`, `sim` or `scratch`.
+  Which published checkpoint family to transfer from.
 
-* **data_dir** (*str*; required variable)- The path to the data directory containing the `info.csv` file and the `cutouts/` folder.
+* **--freeze** (*str*, default=`"vgg_features_early"`) - Which parameter
+  group to freeze. Note the parameter budget is lopsided: the classifier is
+  ~74% of the model and the convolutional features only ~9%, so freezing
+  the features frees far less than it appears to.
 
-* **split_slug** (*str*; required variable) - This specifies which data-split is used from the `splits` folder in `data_dir`. For split, the options are `balanced`, `unbalanced` and for slug the options are `xs`, `sm`, `md`, `lg`, `xl`, `dev`, and `dev2`. Refer to the [Make Splits](#make-splits) section for more information.
+* **--allow-broad-reinit** (*flag*) - By default only `fc_loc.0.weight` may
+  be re-initialised when loading a checkpoint, because it is the sole
+  input-size-dependent tensor. Anything else being re-initialised means the
+  transfer is not doing what you think, so it raises. This flag disables
+  that guard.
 
-* **target_metrics** (*str*; default=`"bt_g"`) - Enter the column names of `info.csv` that you want the model to learn/predict separated by a comma. For example, if you want the model to predict the `R_e` and `bt` columns, then you should enter `R_e,bt`. 
+* **--head-lr-mult** (*float*, default=`10.0`) - The re-initialised STN head
+  and the classifier train at this multiple of `--lr`; the backbone is
+  already close to right.
 
-* **loss** (*str*; default=`"aleatoric_cov"`) - This can be set to the following options:-
-    * **mse**
-    * **aleatoric**
-    * **aleatoric_cov**  
+* **--lr** (*float*, default=`5e-7`) - `aleatoric_cov` exponentiates its
+  variance terms and diverges easily. Anything above ~1e-6 should be
+  treated as suspect.
 
-    For most purposes when you want full posterior distributions similar to the original GaMPEN results, you should use `aleatoric_cov`. The aleatoric covariance loss is the full loss function is given by 
+* **--patience** (*int*, default=`25`) - Early-stopping patience on devel
+  loss. `ReduceLROnPlateau` uses a third of it.
 
-    $$ - \log \mathcal{L} \propto  \sum_{n} \frac{1}{2}\left[\boldsymbol{Y}_{n}-\boldsymbol{\hat{\mu}}_{n}\right]^{\top} \boldsymbol{\hat{\Sigma_n}}^{-1}\left[\boldsymbol{Y}_{n}-\boldsymbol{\hat{\mu}}_{n}\right] + \frac{1}{2} \log [\operatorname{det}(\boldsymbol{\hat{\Sigma_n}})] $$
+* **--expand-data** (*int*, default=`4`) - Augmentation factor, applied to
+  the train split only. The per-epoch train *evaluation* uses an
+  un-augmented view, because a loss measured through random rotations is
+  not comparable with the devel loss.
 
-    where $Y_n$ is the target variable (values passed in `info.csv`); $\boldsymbol{\hat{\mu}}_n$ and $\boldsymbol{\hat{\Sigma}}_n$ are the mean and covariance matrix of the multivariate Gaussian distribution predicted by GaMPEN for an image. For an extended derivation of the loss function, please refer to [Ghosh et. al. 2022](https://iopscience.iop.org/article/10.3847/1538-4357/ac7f9e). 
+* **--force-resplit** (*flag*) - Refused on an existing seed; pick a new
+  `--seed` instead.
 
-    The `aleatoric_loss` option implements a similar loss function as above, but instead of using the full covariance matrix, it uses only the diagonal elements.
+* **--limit** (*int*, default=`None`) - Truncate every split. For overfit
+  and smoke tests.
 
-    The `mse` options implements a standard mean squared error loss function.
+* **--figures-dir** (*str*, default=`None`) - Where figures go. Defaults to
+  `training_eval_figs/` inside the run directory.
 
+* **--mlflow** (*flag*) - Also log to MLflow. Off by default: on MLflow 3.x
+  the `file://` store silently records nothing at all, so the flat
+  `metrics.csv` and `train.log` are the source of truth. Point it at a
+  sqlite tracking URI if you turn this on.
 
-* **expand_data** (*int*; default=`1`) - This controls the factor by which the training data is augmented. For example, if you set this to 2, and you have 1000 images in the training set, then the training set will be expanded to 2000 images. This is useful when you want to train the model on a larger dataset. 
+### What a run writes
 
-    If you are using this option, then you should also set the `transform` option to `True`. This will ensure that the images are passed through a series of random transformations during training.
+Everything a run produces sits in one directory on the data volume, so a
+run can be copied or archived whole. A `best.pt`/`last.pt` pair is over a
+gigabyte, which is why this is never inside the package.
 
-* **cutout_size** (*int*; default=`167`) - This variable is used to set the size of the input layer of the GaMPEN model. This should be set to the size of the cutouts that you are using; otherwise you will get size-mismatch errors.
-
-    If you have cutouts that vary in size, you must ensure that all the cutouts are bigger than this `cutout_size` value, and you could use the `crop` option to crop the cutouts to this `cutot_size` value before being fed into the model.
-
-* **channels** (*int*; default=`3`) - This variable is used to set the number of channels in the input layer of the GaMPEN model. Since GaMPEN's original based CNN is based on a VGG-16 pre-trained model, this variable is set to 3 by default.
-
-* **n_workers** (*int*; default=`4`) - The number of workers to be used during the
-data loading process. You should set this to the number of CPU threads you have available. 
-
-* **batch_size** (*int*; default=`16`) - The batch size to be used during training the model. This variable specifies how many images will be processed in a single batch. This is a hyperparameter and must be tuned. The default value is a good starting point. While tuning this value, we recommend changing this by a factor of 2 each time.
-
-* **epochs** (*int*; default=`40`) - The number of epochs you want to train GaMPEN for. Each epoch refers to all the training images being processed through the network once. You will need to optimize this value based on how much the loss function is decreasing with the number of epochs. The default value is a good starting point.
-
-* **lr** (*float*; default=`5e-7`) - This is the learning rate to be used during the training process. This is a hyperparameter that should be tuned during the training process. The default value is a good starting point.  While tuning this value, we recommend changing this by an order of magnitude each time. 
-
-* **momentum** (*float*; default=`0.9`) - The value of the momentum to be used in the gradient descent optimizer that is used to train the model. This must always be $\geq0$. This accelerates the gradient descent process. This is a hyperparameter that should be tuned during the training process. The default value is a good starting point. For tuning, we recommend trying out values between 0.8 and 0.99.
-
-* **weight_decay** (*float*; default=`0`) - This represents the value you want to set for the L2 regularization term. This is a hyperparameter that should be tuned during the training process. The default value is a good starting point. For tuning we recommend starting from `1e-5` and increasing/decreasing by an order of magnitude each time.
-
-    The `weight_decay` value is simply passed to the PyTorch [SGD optimizer](https://pytorch.org/docs/stable/generated/torch.optim.SGD.html) 
-
-* **parallel/ no-parallel** (*bool*; default=`True`) - The parallel argument controls whether or not to use multiple GPUs during training when they are available. 
-
-   ```{note}
-   The above notation (which is used for other arugments as well) implies that if you pass `--parallel` then the `parallel` argument is set to `True`. If you pass `--no-parallel` then the `parallel` argument is set to `False`. 
-    ```
-
-* **normalize/no-normalize** (*bool*; default=`True`) - The normalize argument controls whether or not, the loaded images will be normalized using the `arsinh` function. 
-
-* **label_scaling** (*str*; default=`"std"`) - The label scaling option controls whether to standardize the training labels or not. Set this to `std` for [sklearn's `StandardScaling()`](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html) and `minmax` for [sklearn's `MinMaxScaler()`](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.MinMaxScaler.html). This should usually always be set to `std` especially when using multiple target variables.
-
-* **transform/no-transform** (*bool*; default=`True`) - If True, the training images are passed through a series of sequential random transformations:-
-
-    * First the images are cropped to the `cutout_size` value.
-    * Then the images are flipped horizontally with a $50\%$ probability.
-    * The the images are vertically flipped with a $50\%$ probability.
-    * Finally a random rotation is applied to the image with any value between 0 and 360 degrees.
-
-    All the above transformations are performed using the [kornia library](https://kornia.readthedocs.io/en/latest/index.html). 
-
-* **crop/no-crop** (*bool*; default=`True`) - If True, all images are passed through a cropping operation before being fed into the network. Images are cropped
-to the `cutout_size` parameter.
-
-* **nesterov/no-nesterov** (*bool*; default=`False`) - Whether to use Nesterov momentum or not. This variable is simply passsed to the PyTorch [SGD optimizer](https://pytorch.org/docs/stable/generated/torch.optim.SGD.html). This is a hyperparameter that should be tuned during the training process.
-
-* **repeat_dims/no-repeat_dims** (*bool*; default=`True`) - When you have a multichannel network and you are feeding in images with only one channel, you should set this parameter to `True`. This automatically repeats the image as many times as the number of channels in the network, while data-loading. 
-
-* **dropout_rate** (*float*; default=`None`) - The dropout rate to use for all the layers in the model. If this is set to None, then the default dropout rate in the specific model is used.
-
-    ```{attention}
-    The `dropout_rate` is an important hyperparameter that among other things, also controls the predicted epistemic uncertainity when using Monte Carlo Dropout. This hyperparameter should be tuned in order to achieve callibrated coverage probabilities.
-
-    We recommend tuning the `dropout_rate` once you have tuned all other hyperparameters. Refer to [Ghosh et. al. 2022](https://iopscience.iop.org/article/10.3847/1538-4357/ac7f9e) and [Ghosh et. al. 2022b](https://arxiv.org/abs/2212.00051) for more details on how we tuned this hyperparameter. 
-
-    ```
-
-
+```
+<runs_root>/<bin>/<band>/<run_name>/
+    config.json     every resolved argument, both git SHAs, the split
+                    hashes and the scaler statistics -- enough to
+                    reconstruct the run from this file alone
+    metrics.csv     one row per epoch, flushed as it goes
+    train.log       one human-readable line per epoch, for tail -f
+    best.pt         lowest devel loss so far
+    last.pt         rewritten every epoch, so a killed run is resumable
+    training_eval_figs/    ten diagnostic figures
+```
 
 ## Inference
 

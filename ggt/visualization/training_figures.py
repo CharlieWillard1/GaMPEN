@@ -460,19 +460,16 @@ def label_dists(cfg, scaler, out_dir):
 def make_all(run_dir, out_dir=None):
     """Produce every figure that this run has the ingredients for.
 
-    Figures go to the analysis repo, not beside the checkpoints: a run
-    directory holds 1.2 GB of weights and lives on the data volume, while
-    these are small and are meant to be looked at. Resolution order is the
-    explicit `out_dir`, then the run's recorded `figures_dir`, then
-    `layout.figures_dir(run_name)`.
+    Figures land beside the run they describe, so a run directory is one
+    self-contained thing. Resolution order is the explicit `out_dir`, then
+    the run's recorded `figures_dir`, then `training_eval_figs/` inside the
+    run directory.
     """
     run_dir = Path(run_dir)
     cfg = json.loads((run_dir / "config.json").read_text())
 
     if out_dir is None:
-        out_dir = cfg.get("figures_dir") or layout.figures_dir(
-            cfg.get("run_name", run_dir.name)
-        )
+        out_dir = cfg.get("figures_dir") or run_dir / "training_eval_figs"
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
