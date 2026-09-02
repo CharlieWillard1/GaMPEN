@@ -93,6 +93,41 @@ def save_state_dict(model, path):
     return path
 
 
+TRAIN_STATE = "train_state.pt"
+
+
+def save_training_state(path, optimizer, lr_scheduler, epoch, best):
+    """Everything a restart needs that `last.pt` does not contain.
+
+    Model weights stay in `best.pt`/`last.pt` as bare state dicts, because
+    `--init-checkpoint`, the figures and the analysis scripts all read them
+    that way. The optimizer's momentum buffers, the scheduler's plateau
+    bookkeeping and the epoch counter live here instead, so neither format
+    has to change.
+    """
+    payload = {
+        "optimizer": optimizer.state_dict(),
+        "scheduler": (
+            lr_scheduler.state_dict() if lr_scheduler is not None else None
+        ),
+        "epoch": epoch,
+        "best": dict(best),
+    }
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
+    return path
+
+
+def load_training_state(run_dir):
+    """Read a run's training state, or None if it has none."""
+    path = Path(run_dir) / TRAIN_STATE
+    if not path.exists():
+        return None
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def create_trainer(
     model,
     optimizer,
@@ -111,6 +146,7 @@ def create_trainer(
     target_names=None,
     use_mlflow=True,
     output_transform=None,
+    resume_state=None,
 ):
     """Set up Ignite trainer and evaluator.
 
@@ -156,6 +192,11 @@ def create_trainer(
     target_names : sequence of str, optional
         Names for the per-target `elementwise_mae` columns. Defaults to
         positional indices.
+    resume_state : dict, optional
+        From `load_training_state`. Restores the optimizer's momentum
+        buffers, the scheduler's plateau state, the best-so-far tracking
+        and the epoch counter, so a restarted run continues rather than
+        beginning again at the initial learning rate with empty momentum.
     output_transform : callable, optional
         Maps `(y_pred, y)` to the form the metrics expect. Defaults to a
         dispatch on the loss type, which assumes the model predicts every
@@ -230,6 +271,23 @@ def create_trainer(
     # Mutable, because the epoch handler below is a closure over them.
     best = {"loss": None, "epoch": None, "since_improved": 0}
     clock = {"last": time.time()}
+    epoch_offset = 0
+
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state["optimizer"])
+        if lr_scheduler is not None and resume_state.get("scheduler"):
+            lr_scheduler.load_state_dict(resume_state["scheduler"])
+        best.update(resume_state.get("best") or {})
+        epoch_offset = int(resume_state.get("epoch", 0))
+        logging.info(
+            "resuming after epoch %d: lr %.2e, best devel %s @ %s, "
+            "%d epochs without improvement",
+            epoch_offset,
+            optimizer.param_groups[0]["lr"],
+            "n/a" if best["loss"] is None else f"{best['loss']:.4f}",
+            best["epoch"],
+            best["since_improved"],
+        )
 
     def append_row(row):
         with open(metrics_csv, "a", newline="") as fh:
@@ -237,7 +295,7 @@ def create_trainer(
 
     def append_log_line(row):
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total = trainer.state.max_epochs
+        total = trainer.state.max_epochs + epoch_offset
         train_loss = row["train_loss"]
         train_str = "  n/a " if train_loss is None else f"{train_loss:.4f}"
         line = (
@@ -266,7 +324,9 @@ def create_trainer(
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def log_epoch_results(trainer):
-        epoch = trainer.state.epoch
+        # Absolute across restarts, so metrics.csv and train.log stay a
+        # single continuous record of the model rather than of one process.
+        epoch = trainer.state.epoch + epoch_offset
 
         train = None
         if eval_train and epoch % train_eval_every == 0:
@@ -315,6 +375,13 @@ def create_trainer(
             save_state_dict(model, checkpoint_dir / "last.pt")
             if improved:
                 save_state_dict(model, checkpoint_dir / "best.pt")
+            save_training_state(
+                checkpoint_dir / TRAIN_STATE,
+                optimizer,
+                lr_scheduler,
+                epoch,
+                best,
+            )
 
         if patience is not None and best["since_improved"] >= patience:
             trainer.terminate()

@@ -562,6 +562,7 @@ def _jsonable(value):
 def run(args):
     """The whole pipeline, in order."""
     from ggt.train import create_trainer
+    from ggt.train.create_trainer import load_training_state
 
     root = args.data_root
     resolved = resolve(
@@ -610,6 +611,36 @@ def run(args):
         limit=args.limit,
     )
 
+    resume_state = None
+    init_checkpoint = args.init_checkpoint
+    if args.resume:
+        if init_checkpoint:
+            raise SystemExit(
+                "--resume and --init-checkpoint are mutually exclusive: "
+                "one continues this run, the other starts a new one from "
+                "somebody else's weights."
+            )
+        resume_state = load_training_state(resolved["run_dir"])
+        last = resolved["run_dir"] / "last.pt"
+        if resume_state is None or not last.exists():
+            raise SystemExit(
+                f"nothing to resume in {resolved['run_dir']}: expected "
+                f"last.pt and train_state.pt. Drop --resume to start fresh."
+            )
+        done = int(resume_state.get("epoch", 0))
+        if done >= args.epochs:
+            raise SystemExit(
+                f"run already reached epoch {done} of {args.epochs}; "
+                f"raise --epochs to continue it."
+            )
+        init_checkpoint = str(last)
+        log.info(
+            "resuming %s from epoch %d, %d to go",
+            args.run_name,
+            done,
+            args.epochs - done,
+        )
+
     net, report, device, net_info = build_net(
         args.z_bin,
         cutout_size,
@@ -619,7 +650,7 @@ def run(args):
         freeze=args.freeze,
         allow_broad_reinit=args.allow_broad_reinit,
         root=root,
-        init_checkpoint=args.init_checkpoint,
+        init_checkpoint=init_checkpoint,
     )
 
     optimizer, criterion, scheduler = build_optimizer(
@@ -696,12 +727,20 @@ def run(args):
         target_names=targets,
         use_mlflow=args.mlflow,
         output_transform=subset_metric_transform,
+        resume_state=resume_state,
     )
 
+    # --epochs is the TOTAL for this run name, not a number to add, so a
+    # resumed run finishes the same schedule rather than doubling it.
+    done = int((resume_state or {}).get("epoch", 0))
+    remaining = args.epochs - done
     log.info(
-        "training for up to %d epochs -> %s", args.epochs, resolved["run_dir"]
+        "training for up to %d more epochs (%d total) -> %s",
+        remaining,
+        args.epochs,
+        resolved["run_dir"],
     )
-    trainer.run(loaders["train"], max_epochs=args.epochs)
+    trainer.run(loaders["train"], max_epochs=remaining)
     log.info(
         "done: best devel loss %.4f at epoch %s",
         trainer.state.best_devel_loss,
@@ -860,6 +899,15 @@ def parse_pixel_zp(value):
     help="Truncate every split. For overfit and smoke tests.",
 )
 @click.option("--mlflow", is_flag=True, default=False)
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Continue this run name where it stopped, restoring the "
+    "optimizer's momentum, the LR schedule and the epoch counter. Without "
+    "it a restart begins again at the initial learning rate with empty "
+    "momentum buffers. --epochs is the total, not the number to add.",
+)
 @click.option("--no-figures", is_flag=True, default=False)
 @click.option(
     "--figures-dir",
