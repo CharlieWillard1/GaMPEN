@@ -62,13 +62,22 @@ def _pretty(name):
 def rebuild_devel(cfg, split="devel"):
     """Rebuild one split's dataset exactly as the run built it."""
     root = cfg.get("data_root")
+    # The scaler is always fitted on the survey's full target list, even
+    # when a run trained on a subset of it, so load it with that list and
+    # then narrow it. Asking for the subset directly fails the column
+    # check and takes the whole figure pass down with it.
+    full = list(cfg.get("survey_target_columns") or _targets(cfg))
     scaler = splits.load_scaler(
         cfg["z_bin"],
         cfg["band"],
         seed=cfg["seed"],
         root=root,
-        target_metrics=_targets(cfg),
+        target_metrics=full,
     )
+    if _targets(cfg) != full:
+        idx = [full.index(t) for t in _targets(cfg)]
+        scaler = splits.ColumnSubsetScaler(scaler, idx)
+
     import kornia.augmentation as K
     import torch.nn as nn
 
@@ -192,8 +201,10 @@ def lr_schedule(df, cfg, out_dir):
 
 def elementwise_mae(df, cfg, out_dir):
     names = _targets(cfg)
-    fig, axes = plt.subplots(1, len(names), figsize=(4.2 * len(names), 3.6))
-    axes = np.atleast_1d(axes)
+    fig, axes = plt.subplots(
+        1, len(names), figsize=(4.2 * len(names), 3.6), squeeze=False
+    )
+    axes = axes[0]
     for ax, name in zip(axes, names):
         for prefix, style in (("train", "-"), ("devel", "-")):
             col = f"{prefix}_mae_{name}"
@@ -286,20 +297,56 @@ def stn_scale_hist(net, ds, cfg, out_dir, max_n=2000):
     return _save(fig, out_dir, "stn_scale_hist.png")
 
 
+def display_space(name, values):
+    """Map a target into the units it is easiest to judge in.
+
+    The network trains on `custom_logit_bt` because a logit is unbounded
+    and symmetric, which suits a Gaussian likelihood -- but bulge-to-total
+    is a fraction, and a plot of it should run 0 to 1.
+
+    `expit` is the plain inverse; `logit_custom` additionally nudges exact
+    0s and 1s inward by an epsilon derived from the training column, so
+    values that started at exactly 0 or 1 come back very close to, but not
+    exactly at, the endpoints. That is immaterial for a diagnostic plot.
+
+    Returns `(values, label, limits)`; limits is None to autoscale.
+    """
+    if name == "custom_logit_bt":
+        from scipy.special import expit
+
+        return expit(values), "B/T", (0.0, 1.0)
+    return values, _pretty(name), None
+
+
 def devel_pred_vs_true(preds, truths, scaler, cfg, out_dir):
     names = _targets(cfg)
     p = scaler.inverse_transform(preds)
     t = scaler.inverse_transform(truths)
 
-    fig, axes = plt.subplots(1, len(names), figsize=(4.3 * len(names), 4.0))
-    axes = np.atleast_1d(axes)
+    fig, axes = plt.subplots(
+        1, len(names), figsize=(4.3 * len(names), 4.0), squeeze=False
+    )
+    axes = axes[0]
     for i, (ax, name) in enumerate(zip(axes, names)):
-        ax.hexbin(t[:, i], p[:, i], gridsize=35, cmap="viridis", mincnt=1)
-        lo = min(t[:, i].min(), p[:, i].min())
-        hi = max(t[:, i].max(), p[:, i].max())
+        tv, label, lim = display_space(name, t[:, i])
+        pv, _, _ = display_space(name, p[:, i])
+
+        ax.hexbin(
+            tv,
+            pv,
+            gridsize=35,
+            cmap="viridis",
+            mincnt=1,
+            extent=(lim + lim) if lim else None,
+        )
+        lo = lim[0] if lim else min(tv.min(), pv.min())
+        hi = lim[1] if lim else max(tv.max(), pv.max())
         ax.plot([lo, hi], [lo, hi], "w--", lw=1.2)
-        ax.set_xlabel(f"GALFIT {_pretty(name)}")
-        ax.set_ylabel(f"predicted {_pretty(name)}")
+        if lim:
+            ax.set_xlim(*lim)
+            ax.set_ylim(*lim)
+        ax.set_xlabel(f"GALFIT {label}")
+        ax.set_ylabel(f"predicted {label}")
     fig.suptitle("Devel: predicted vs GALFIT", y=1.02)
     return _save(fig, out_dir, "devel_pred_vs_true.png")
 
@@ -308,8 +355,10 @@ def devel_residual_hist(preds, truths, scaler, cfg, out_dir):
     names = _targets(cfg)
     resid = scaler.inverse_transform(preds) - scaler.inverse_transform(truths)
 
-    fig, axes = plt.subplots(1, len(names), figsize=(4.3 * len(names), 3.6))
-    axes = np.atleast_1d(axes)
+    fig, axes = plt.subplots(
+        1, len(names), figsize=(4.3 * len(names), 3.6), squeeze=False
+    )
+    axes = axes[0]
     for i, (ax, name) in enumerate(zip(axes, names)):
         r = resid[:, i]
         ax.hist(r, bins=45, color="slateblue", alpha=0.85)
@@ -422,8 +471,12 @@ def label_dists(cfg, scaler, out_dir):
         except SystemExit:
             continue
 
-    fig, axes = plt.subplots(2, len(names), figsize=(4.3 * len(names), 6.4))
-    axes = np.atleast_2d(axes)
+    # squeeze=False keeps this 2-D even for a single-target run, where
+    # matplotlib would otherwise return a 1-D array and the [row, col]
+    # indexing below would go out of bounds.
+    fig, axes = plt.subplots(
+        2, len(names), figsize=(4.3 * len(names), 6.4), squeeze=False
+    )
     for i, name in enumerate(names):
         for split, df in frames.items():
             raw = np.asarray(df[name], dtype=float)

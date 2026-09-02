@@ -34,6 +34,7 @@ import click
 import numpy as np
 
 from ggt.data import cache_dataset, layout, splits
+from ggt.data.splits import ColumnSubsetScaler
 from ggt.models import transfer as models
 from ggt.surveys import euclid
 
@@ -52,26 +53,6 @@ def target_indices(subset):
             f"unknown target(s) {missing}; expected from {TARGET_COLUMNS}"
         )
     return [TARGET_COLUMNS.index(t) for t in subset]
-
-
-class ColumnSubsetScaler:
-    """A fitted scaler restricted to some of its columns.
-
-    The scaler is fitted once on the full target set and shared by every
-    run, so a subset run must not refit it -- that would change the
-    normalisation and make the runs incomparable. This just selects the
-    relevant means and scales.
-    """
-
-    def __init__(self, scaler, idx):
-        self.mean_ = np.asarray(scaler.mean_)[idx]
-        self.scale_ = np.asarray(scaler.scale_)[idx]
-
-    def transform(self, X):
-        return (np.asarray(X, dtype=float) - self.mean_) / self.scale_
-
-    def inverse_transform(self, X):
-        return np.asarray(X, dtype=float) * self.scale_ + self.mean_
 
 
 class TargetSubsetLoss:
@@ -734,8 +715,17 @@ def run(args):
             training_figures.make_all(
                 resolved["run_dir"], resolved["figures_dir"]
             )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("figures failed (%s); run_dir is still complete", exc)
+        except BaseException as exc:  # noqa: BLE001
+            # Includes SystemExit: the helpers exit rather than raise.
+            # Training has already finished and the run directory is
+            # complete, so a figure problem must not fail the run --
+            # and must not take down a script running further stages.
+            log.warning(
+                "figures failed (%s: %s); run_dir is still complete, "
+                "regenerate with scripts/make_figs.sh",
+                type(exc).__name__,
+                exc,
+            )
 
     return resolved["run_dir"]
 

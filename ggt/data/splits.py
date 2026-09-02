@@ -39,6 +39,26 @@ log = logging.getLogger("ggt.data.splits")
 DEFAULT_FRACTIONS = {"train": 0.70, "devel": 0.15, "test": 0.15}
 
 
+class ColumnSubsetScaler:
+    """A fitted scaler restricted to some of its columns.
+
+    The scaler is fitted once on the full target set and shared by every
+    run, so a run training on a subset must not refit it -- that would
+    change the normalisation and make runs incomparable. This selects the
+    relevant means and scales instead.
+    """
+
+    def __init__(self, scaler, idx):
+        self.mean_ = np.asarray(scaler.mean_)[idx]
+        self.scale_ = np.asarray(scaler.scale_)[idx]
+
+    def transform(self, X):
+        return (np.asarray(X, dtype=float) - self.mean_) / self.scale_
+
+    def inverse_transform(self, X):
+        return np.asarray(X, dtype=float) * self.scale_ + self.mean_
+
+
 def slug_for(seed: int) -> str:
     return f"euclid-{seed}"
 
