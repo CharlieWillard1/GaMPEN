@@ -131,8 +131,12 @@ def load_best_model(cfg, run_dir):
     return net
 
 
-def _predict(net, ds, batch_size=16, max_n=4000):
-    """Mean predictions (first `n_target` outputs) and truths, both scaled."""
+def _predict(net, ds, batch_size=16, max_n=4000, device=None):
+    """Mean predictions (first `n_target` outputs) and truths, both scaled.
+
+    `device` lets this run against the live model mid-training, which sits
+    on the GPU; the standalone path leaves it None and works on CPU.
+    """
     import torch
 
     n = min(len(ds.labels), max_n)
@@ -141,6 +145,8 @@ def _predict(net, ds, batch_size=16, max_n=4000):
         for start in range(0, n, batch_size):
             stop = min(start + batch_size, n)
             batch = torch.stack([ds[i][0] for i in range(start, stop)])
+            if device is not None:
+                batch = batch.to(device)
             out = net(batch)
             preds.append(out[:, : ds.labels.shape[1]].cpu().numpy())
             truths.append(np.asarray(ds.labels[start:stop], dtype=float))
@@ -151,40 +157,76 @@ def _predict(net, ds, batch_size=16, max_n=4000):
 
 
 def loss_curve(df, cfg, out_dir):
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    """Two panels: the loss as it is, and the same on a log axis.
+
+    `aleatoric_cov` is a log-likelihood, so its `0.5 log det Sigma` term
+    drives the total negative once the predicted variances shrink -- which
+    is what a converging run does. A log axis cannot show negative values
+    at all, and symlog shows them but compresses the interesting decades
+    into an unreadable band near zero.
+
+    So: the left panel is plain linear, always correct and always
+    complete. The right panel takes the sign of the final devel loss and
+    plots the loss with that sign flipped in, which puts a converged run's
+    values above zero and lets a real log axis resolve the late-time
+    structure that the linear panel squashes.
+    """
+    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(12.5, 4.5))
+
+    # --- left: linear, everything, no transformation -------------------
     if df["train_loss"].notna().any():
-        ax.plot(df["epoch"], df["train_loss"], label="train", lw=1.6)
-    ax.plot(df["epoch"], df["devel_loss"], label="devel", lw=1.6)
+        ax_lin.plot(df["epoch"], df["train_loss"], label="train", lw=1.6)
+    ax_lin.plot(df["epoch"], df["devel_loss"], label="devel", lw=1.6)
 
     best_i = df["devel_loss"].idxmin()
-    ax.axvline(df["epoch"][best_i], color="0.4", ls="--", lw=1)
-    ax.plot(
-        df["epoch"][best_i],
-        df["devel_loss"][best_i],
+    best_epoch = int(df["epoch"][best_i])
+    best_loss = df["devel_loss"][best_i]
+    ax_lin.axvline(best_epoch, color="0.4", ls="--", lw=1)
+    ax_lin.plot(
+        best_epoch,
+        best_loss,
         "o",
         color="crimson",
         zorder=5,
-        label=f"best devel {df['devel_loss'][best_i]:.4f} "
-        f"@ {int(df['epoch'][best_i])}",
+        label=f"best devel {best_loss:.4f} @ {best_epoch}",
     )
+    ax_lin.axhline(0, color="0.6", lw=0.8, zorder=0)
+    ax_lin.set_xlabel("epoch")
+    ax_lin.set_ylabel("aleatoric_cov loss")
+    ax_lin.set_title("Loss (linear)")
+    ax_lin.legend()
+    ax_lin.grid(alpha=0.3)
 
-    # `aleatoric_cov` is a log-likelihood: its 0.5*logdet term drives the loss
-    # NEGATIVE once the predicted variances shrink, which is exactly what an
-    # overfit run does. A plain log axis silently drops those points and the
-    # curve appears to fall off the bottom of the plot, so only use log when
-    # every value is positive.
-    values = pd.concat([df["train_loss"], df["devel_loss"]]).dropna()
-    if len(values) and values.min() > 0:
-        ax.set_yscale("log")
-    else:
-        ax.set_yscale("symlog", linthresh=0.1)
-        ax.axhline(0, color="0.6", lw=0.8, zorder=0)
+    # --- right: log, sign taken from where the run ended ---------------
+    devel = df["devel_loss"].dropna()
+    sign = -1.0 if len(devel) and devel.iloc[-1] < 0 else 1.0
+    tag = "-loss" if sign < 0 else "loss"
 
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("aleatoric_cov loss")
-    ax.set_title("Loss")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    dropped = 0
+    for col, label in (("train_loss", "train"), ("devel_loss", "devel")):
+        if col not in df or not df[col].notna().any():
+            continue
+        y = sign * df[col]
+        keep = y > 0
+        dropped += int((~keep & df[col].notna()).sum())
+        ax_log.plot(df["epoch"][keep], y[keep], label=label, lw=1.6)
+
+    if sign * best_loss > 0:
+        ax_log.plot(
+            best_epoch, sign * best_loss, "o", color="crimson", zorder=5
+        )
+        ax_log.axvline(best_epoch, color="0.4", ls="--", lw=1)
+
+    ax_log.set_yscale("log")
+    ax_log.set_xlabel("epoch")
+    ax_log.set_ylabel(tag)
+    title = f"Loss (log of {tag})"
+    if dropped:
+        title += f"  -- {dropped} points of opposite sign not shown"
+    ax_log.set_title(title)
+    ax_log.legend()
+    ax_log.grid(alpha=0.3, which="both")
+
     return _save(fig, out_dir, "loss_curve.png")
 
 

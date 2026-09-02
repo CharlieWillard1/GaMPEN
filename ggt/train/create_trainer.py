@@ -147,6 +147,8 @@ def create_trainer(
     use_mlflow=True,
     output_transform=None,
     resume_state=None,
+    figure_hook=None,
+    figure_every=0,
 ):
     """Set up Ignite trainer and evaluator.
 
@@ -192,6 +194,14 @@ def create_trainer(
     target_names : sequence of str, optional
         Names for the per-target `elementwise_mae` columns. Defaults to
         positional indices.
+    figure_hook : callable, optional
+        Called as `figure_hook(epoch)` every `figure_every` epochs, and
+        once more when training ends. Intended for progress figures, so
+        that a long run can be judged -- and abandoned -- without waiting
+        for it to finish. Exceptions are swallowed: a plotting problem
+        must never interrupt training.
+    figure_every : int
+        Epoch interval for `figure_hook`. 0 disables it.
     resume_state : dict, optional
         From `load_training_state`. Restores the optimizer's momentum
         buffers, the scheduler's plateau state, the best-so-far tracking
@@ -382,6 +392,21 @@ def create_trainer(
                 epoch,
                 best,
             )
+
+        if (
+            figure_hook is not None
+            and figure_every
+            and epoch % figure_every == 0
+        ):
+            try:
+                figure_hook(epoch)
+            except BaseException as exc:  # noqa: BLE001
+                logging.warning(
+                    "progress figures at epoch %d failed (%s: %s)",
+                    epoch,
+                    type(exc).__name__,
+                    exc,
+                )
 
         if patience is not None and best["since_improved"] >= patience:
             trainer.terminate()

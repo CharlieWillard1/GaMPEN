@@ -673,7 +673,7 @@ def run(args):
         repo_root = enclosing_repo(Path.cwd())
     fork_sha, fork_branch = git_describe(fork_root or Path.cwd())
     repo_sha, repo_branch = git_describe(repo_root or Path.cwd())
-    write_config(
+    cfg_payload = write_config(
         resolved["config_json"],
         args,
         {
@@ -705,6 +705,37 @@ def run(args):
             f"sqlite:///{resolved['run_dir'] / 'mlflow.db'}",
         )
 
+    def progress_figures(epoch):
+        """Two cheap figures mid-run, so a bad run can be spotted early.
+
+        `elementwise_mae` comes straight off metrics.csv; the scatter needs
+        a forward pass over devel, which is a few seconds on the GPU. The
+        live model is used directly -- switched to eval() for the pass and
+        back afterwards -- rather than reloading best.pt, so the figures
+        show the model as it stands right now.
+        """
+        import pandas as pd
+
+        from ggt.visualization import training_figures as tf
+
+        out = Path(resolved["figures_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+
+        tf.elementwise_mae(
+            pd.read_csv(resolved["metrics_csv"]), cfg_payload, out
+        )
+
+        was_training = net.training
+        net.eval()
+        try:
+            preds, truths = tf._predict(
+                net, loaders["devel"].dataset, device=device
+            )
+            tf.devel_pred_vs_true(preds, truths, scaler, cfg_payload, out)
+        finally:
+            net.train(was_training)
+        log.info("progress figures written at epoch %d -> %s", epoch, out)
+
     def subset_metric_transform(output):
         y_pred, y = output
         return y_pred[..., criterion.mean_cols], y
@@ -728,6 +759,8 @@ def run(args):
         use_mlflow=args.mlflow,
         output_transform=subset_metric_transform,
         resume_state=resume_state,
+        figure_hook=None if args.no_figures else progress_figures,
+        figure_every=args.figure_every,
     )
 
     # --epochs is the TOTAL for this run name, not a number to add, so a
@@ -907,6 +940,14 @@ def parse_pixel_zp(value):
     "optimizer's momentum, the LR schedule and the epoch counter. Without "
     "it a restart begins again at the initial learning rate with empty "
     "momentum buffers. --epochs is the total, not the number to add.",
+)
+@click.option(
+    "--figure-every",
+    type=int,
+    default=15,
+    help="Write devel_pred_vs_true and elementwise_mae every N epochs "
+    "while training, so a long run can be judged without waiting for it "
+    "to finish. 0 disables the mid-run figures.",
 )
 @click.option("--no-figures", is_flag=True, default=False)
 @click.option(
