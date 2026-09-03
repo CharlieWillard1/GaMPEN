@@ -220,8 +220,9 @@ def coverage_sweep(runs, out_dir, split="devel", key="dropout"):
     run, labelled by the value of `key`, with the mean deviation in the
     legend as the number to sort on.
     """
-    fig, ax = plt.subplots(figsize=(6.2, 5.6))
-    ax.plot([0, 1], [0, 1], "k--", lw=1.2, label="perfect calibration")
+    fonts = style.COVERAGE_FONTS
+    fig, ax = plt.subplots(figsize=(7.0, 6.4))
+    ax.plot([0, 1], [0, 1], "k--", lw=1.4, label="perfect calibration")
 
     best = None
     pcts = np.asarray(cov.DEFAULT_PERCENTILES, dtype=float)
@@ -254,18 +255,20 @@ def coverage_sweep(runs, out_dir, split="devel", key="dropout"):
         if best is None or dev < best[1]:
             best = (run["name"], dev, run["cfg"].get(key))
 
-    ax.set_xlabel("claimed confidence interval")
-    ax.set_ylabel("fraction containing the GALFIT value")
+    ax.set_xlabel("claimed confidence interval", fontsize=fonts["label"])
+    ax.set_ylabel("fraction containing the GALFIT value",
+                  fontsize=fonts["label"])
+    ax.tick_params(labelsize=fonts["tick"])
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_aspect("equal")
     title = f"{split.capitalize()} coverage by {COMPARISON_KEYS.get(key, key)}"
     if best:
         title += f"\nbest: {best[2]} ({best[1]:.1f}% mean deviation)"
-    ax.set_title(title, fontsize=10)
-    ax.legend(fontsize=7.5, loc="lower right",
+    ax.set_title(title, fontsize=fonts["title"])
+    ax.legend(fontsize=fonts["legend"], loc="lower right",
               title=f"{COMPARISON_KEYS.get(key, key)}\n(mean per-parameter dev.)",
-              title_fontsize=7.5)
+              title_fontsize=fonts["legend"])
     return _save(fig, out_dir, f"{split}_coverage_sweep_{key}.png")
 
 
@@ -380,12 +383,22 @@ def make_all(run_dirs, out_dir, split="devel"):
             failed.append(name)
             log.warning("%s: skipped (%s)", name, exc)
 
-    for key in COMPARISON_KEYS:
-        values = {json.dumps(r["cfg"].get(key)) for r in runs}
-        if len(values) > 1:
-            attempt(f"compare_{key}", compare_by, table, out_dir, key,
-                    split=split)
-    attempt("coverage_sweep", coverage_sweep, runs, out_dir, split=split)
+    varying = [
+        key for key in COMPARISON_KEYS
+        if len({json.dumps(r["cfg"].get(key)) for r in runs}) > 1
+    ]
+    for key in varying:
+        attempt(f"compare_{key}", compare_by, table, out_dir, key, split=split)
+
+    # One sweep per axis that actually varies. Keying it to dropout
+    # unconditionally labelled every curve with the same value whenever the
+    # runs differed in something else -- three identical "0.0002" entries
+    # for a learning-rate comparison, say. The filename carries the key, so
+    # the sweeps do not collide.
+    for key in varying or ["dropout"]:
+        attempt(f"coverage_sweep_{key}", coverage_sweep, runs, out_dir,
+                split=split, key=key)
+
     attempt("learning_curve", learning_curve, table, out_dir, split=split)
 
     log.info("comparison figures: %d written to %s", len(made), out_dir)

@@ -280,14 +280,33 @@ def stn_crops(net, ds, cfg, out_dir, n=8, split="devel"):
 
     fig, axes = plt.subplots(2, n, figsize=(1.7 * n, 3.8))
     for i in range(n):
-        axes[0, i].imshow(batch[i, 0].numpy(), origin="lower", cmap="magma")
-        axes[1, i].imshow(warped[i, 0].numpy(), origin="lower", cmap="magma")
+        full = batch[i, 0].numpy()
+        crop = warped[i, 0].numpy()
+
+        # Both panels share the *crop's* range. Left to autoscale, the input
+        # panel takes its range from the whole 400 px frame, where the
+        # brightest pixel is often a neighbour nowhere near the centre --
+        # which crushes the target galaxy to black and makes the top row
+        # unreadable in VIS. Using the crop's range instead means the two
+        # rows are directly comparable and you can see what the STN chose to
+        # keep. Anything brighter than the crop's maximum clips, which is
+        # the intended trade.
+        lo, hi = float(crop.min()), float(crop.max())
+        if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+            lo = hi = None  # degenerate crop: fall back to autoscaling
+
+        axes[0, i].imshow(full, origin="lower", cmap="magma", vmin=lo, vmax=hi)
+        axes[1, i].imshow(crop, origin="lower", cmap="magma", vmin=lo, vmax=hi)
         for row in (0, 1):
             axes[row, i].set_xticks([])
             axes[row, i].set_yticks([])
     axes[0, 0].set_ylabel("input", fontsize=9)
     axes[1, 0].set_ylabel("after STN", fontsize=9)
-    fig.suptitle("Spatial transformer input / output")
+    fig.suptitle(
+        "Spatial transformer input / output\n"
+        "both rows share the crop's stretch, so bright neighbours clip",
+        fontsize=10,
+    )
     return _save(fig, out_dir, f"{split}_stn_crops.png")
 
 

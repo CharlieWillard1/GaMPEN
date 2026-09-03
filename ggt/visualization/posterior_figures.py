@@ -589,8 +589,9 @@ def coverage_figure(samples, truths, out_dir, split="devel"):
 
     pcts, curves, mean = cov.coverage_table(by_target, truth_by_target)
 
-    fig, ax = plt.subplots(figsize=(5.6, 5.2))
-    ax.plot([0, 1], [0, 1], "k--", lw=1.2, label="perfect calibration")
+    fonts = style.COVERAGE_FONTS
+    fig, ax = plt.subplots(figsize=(6.4, 6.0))
+    ax.plot([0, 1], [0, 1], "k--", lw=1.4, label="perfect calibration")
     for col, achieved in curves.items():
         dev = cov.deviation_from_diagonal(pcts, achieved)
         ax.plot(pcts, achieved, marker="o", ms=3.5, lw=1.3,
@@ -598,15 +599,18 @@ def coverage_figure(samples, truths, out_dir, split="devel"):
     dev = cov.deviation_from_diagonal(pcts, mean)
     ax.plot(pcts, mean, color="k", lw=2.2, label=f"mean  ({dev:.1f}%)")
 
-    ax.set_xlabel("claimed confidence interval")
-    ax.set_ylabel("fraction of galaxies containing the GALFIT value")
+    ax.set_xlabel("claimed confidence interval", fontsize=fonts["label"])
+    ax.set_ylabel("fraction of galaxies containing the GALFIT value",
+                  fontsize=fonts["label"])
+    ax.tick_params(labelsize=fonts["tick"])
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_aspect("equal")
     ax.set_title(
-        f"{split.capitalize()} coverage  (legend: mean deviation)", fontsize=10
+        f"{split.capitalize()} coverage  (legend: mean deviation)",
+        fontsize=fonts["title"],
     )
-    ax.legend(fontsize=7.5, loc="lower right")
+    ax.legend(fontsize=fonts["legend"], loc="lower right")
     return _save(fig, out_dir, f"{split}_coverage.png")
 
 

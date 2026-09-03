@@ -29,6 +29,17 @@ log = logging.getLogger(__name__)
 
 DPI = 130
 
+#: Colour floor and draw threshold for every population 2D histogram. Held
+#: equal on purpose: the bottom of the colourbar is then exactly the fewest
+#: galaxies a drawn cell can hold, so the scale means what it says.
+HEXBIN_VMIN = 3
+HEXBIN_MINCNT = 3
+
+#: Type sizes for the coverage figures, which live in two different modules
+#: (`posterior_figures.coverage_figure` and `compare_runs.coverage_sweep`)
+#: and would otherwise drift apart.
+COVERAGE_FONTS = {"title": 12, "label": 12.5, "tick": 11, "legend": 10}
+
 #: Targets whose residuals are best judged as a fraction of the truth.
 #: `custom_logit_bt` is deliberately absent: B/T is already a fraction, and
 #: dividing a fraction by a fraction near zero explodes.
@@ -96,14 +107,26 @@ def residual(name, pred, true):
 
 
 def hexbin(
-    ax, x, y, gridsize=35, extent=None, cmap="viridis", colorbar=True, xscale=None
+    ax, x, y, gridsize=35, extent=None, cmap="viridis", colorbar=True,
+    xscale=None, vmin=HEXBIN_VMIN, mincnt=HEXBIN_MINCNT,
 ):
     """Hexbin on a log colour scale -- the papers' convention.
 
     A linear scale on a galaxy scatter is dominated by the one dense clump
     at the centre of the distribution and shows nothing about the wings,
-    which is exactly where a model fails. `mincnt=1` keeps single-galaxy
-    cells visible rather than blending them into the background.
+    which is exactly where a model fails.
+
+    Cells holding fewer than `mincnt` galaxies are not drawn, and the colour
+    scale starts at `vmin`. The two are equal by default, so the bottom of
+    the colourbar is exactly the fewest galaxies a visible cell can hold.
+
+    **The trend lines are not restricted this way.** `overlay_percentiles`
+    and `robust_ylim` are computed from every finite point, including
+    galaxies whose cells fall below the threshold and are therefore
+    invisible here. That is deliberate -- a 16/84 spread taken only over the
+    dense region would understate the scatter -- but it does mean the dotted
+    percentile curves can run outside the drawn hexes. That is the data, not
+    a rendering fault.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -123,8 +146,8 @@ def hexbin(
         y,
         gridsize=gridsize,
         cmap=cmap,
-        mincnt=1,
-        norm=LogNorm(),
+        mincnt=mincnt,
+        norm=LogNorm(vmin=vmin),
         extent=extent,
         **kw,
     )
