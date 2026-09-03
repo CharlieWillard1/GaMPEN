@@ -731,7 +731,7 @@ def run(args):
             preds, truths = tf._predict(
                 net, loaders["devel"].dataset, device=device
             )
-            tf.devel_pred_vs_true(preds, truths, scaler, cfg_payload, out)
+            tf.pred_vs_true(preds, truths, scaler, cfg_payload, out)
         finally:
             net.train(was_training)
         log.info("progress figures written at epoch %d -> %s", epoch, out)

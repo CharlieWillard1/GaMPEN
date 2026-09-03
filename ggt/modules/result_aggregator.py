@@ -132,7 +132,28 @@ def expit_custom(x_input, scaling_array=None):
     return x
 
 
-def unscale_preds(df_input, scaling_df_path=None, drop_old=True):
+def unscale_preds(
+    df_input, scaling_df_path=None, drop_old=True, zp=None, pogson=None
+):
+    """Invert the logit/log label transforms on a frame of predictions.
+
+    `zp` and `pogson` are a deliberate divergence from upstream, not a
+    bugfix. Upstream hardcodes `-2.512 * log10(f) + 27`. That 2.512 is a
+    self-consistent but nonstandard *definition* inherited from the Yale
+    notebooks: because the published HSC catalogs use it in both
+    directions it cancels, and their numbers are internally coherent.
+
+    Our labels are built with the standard Pogson 2.5 (see
+    `ggt.utils.label_utils`), so that is the default here. **The hazard is
+    mixing them**: our forward transform with upstream's inverse puts a
+    0.48% brightness-dependent slope into `total_mag` -- -0.014 mag at
+    m = 24, -0.053 at m = 16. Pass `pogson=HSC_POGSON` only when
+    reproducing the published HSC catalog's own convention.
+    """
+    from ggt.surveys.euclid import HSC_ZP, POGSON
+
+    zp = HSC_ZP if zp is None else float(zp)
+    pogson = POGSON if pogson is None else float(pogson)
 
     df = df_input.copy(deep=True)
 
@@ -156,7 +177,9 @@ def unscale_preds(df_input, scaling_df_path=None, drop_old=True):
     df["preds_bt"] = expit_custom(
         df["preds_custom_logit_bt"], scaling_array=scaling_array
     )
-    df["preds_total_mag"] = -2.512 * np.log10(df["preds_total_flux_adus"]) + 27
+    df["preds_total_mag"] = (
+        -pogson * np.log10(df["preds_total_flux_adus"]) + zp
+    )
 
     if drop_old is True:
         df = df.drop(

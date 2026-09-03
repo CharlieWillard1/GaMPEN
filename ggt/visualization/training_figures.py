@@ -34,29 +34,24 @@ import pandas as pd  # noqa: E402
 
 from ggt.data import cache_dataset, layout, splits  # noqa: E402
 
+from ggt.visualization import style  # noqa: E402
+
 log = logging.getLogger(__name__)
 
-DPI = 130
+# The style module owns these now, so the three figure tiers cannot drift
+# apart. Kept as module-level names because callers elsewhere import them
+# from here.
+DPI = style.DPI
+_save = style.save
+_pretty = style.pretty
+display_space = style.display_space
 
 
 # --- shared helpers ----------------------------------------------------------
 
 
-def _save(fig, out_dir, name):
-    path = Path(out_dir) / name
-    fig.tight_layout()
-    fig.savefig(path, dpi=DPI)
-    plt.close(fig)
-    log.info("wrote %s", path)
-    return path
-
-
 def _targets(cfg):
     return list(cfg.get("target_columns") or [])
-
-
-def _pretty(name):
-    return name.replace("_", " ")
 
 
 def rebuild_devel(cfg, split="devel"):
@@ -248,10 +243,10 @@ def elementwise_mae(df, cfg, out_dir):
     )
     axes = axes[0]
     for ax, name in zip(axes, names):
-        for prefix, style in (("train", "-"), ("devel", "-")):
+        for prefix, linestyle in (("train", "-"), ("devel", "-")):
             col = f"{prefix}_mae_{name}"
             if col in df and df[col].notna().any():
-                ax.plot(df["epoch"], df[col], style, label=prefix, lw=1.5)
+                ax.plot(df["epoch"], df[col], linestyle, label=prefix, lw=1.5)
         ax.set_title(_pretty(name), fontsize=10)
         ax.set_xlabel("epoch")
         ax.set_ylabel("MAE (scaled)")
@@ -274,7 +269,7 @@ def epoch_time(df, cfg, out_dir):
 # --- model-based figures -----------------------------------------------------
 
 
-def stn_crops(net, ds, cfg, out_dir, n=8):
+def stn_crops(net, ds, cfg, out_dir, n=8, split="devel"):
     import torch
 
     n = min(n, len(ds.labels))
@@ -293,14 +288,16 @@ def stn_crops(net, ds, cfg, out_dir, n=8):
     axes[0, 0].set_ylabel("input", fontsize=9)
     axes[1, 0].set_ylabel("after STN", fontsize=9)
     fig.suptitle("Spatial transformer input / output")
-    return _save(fig, out_dir, "stn_crops.png")
+    return _save(fig, out_dir, f"{split}_stn_crops.png")
 
 
-def stn_scale_hist(net, ds, cfg, out_dir, max_n=2000):
-    """Distribution of the STN's single zoom parameter.
+def stn_scales(net, ds, max_n=2000):
+    """The STN's zoom parameter for the first ``max_n`` galaxies, in order.
 
-    A degenerate spike means the re-initialised ``fc_loc.0`` never learned
-    anything and the transformer is passing its input straight through.
+    Split out from the histogram so the three STN figures share one pass
+    over the localisation head instead of running it three times. Row order
+    matches ``ds.data_info`` and ``_predict``, which is what lets the scale
+    be plotted against a GALFIT column.
     """
     import torch
 
@@ -313,7 +310,17 @@ def stn_scale_hist(net, ds, cfg, out_dir, max_n=2000):
             batch = torch.stack([ds[i][0] for i in range(start, stop)])
             xs = base.localization(batch).view(-1, base.fc_in_size)
             vals.append(base.fc_loc(xs).squeeze(-1).cpu().numpy())
-    s = np.concatenate(vals)
+    return np.concatenate(vals)
+
+
+def stn_scale_hist(net, ds, cfg, out_dir, max_n=2000, s=None, split="devel"):
+    """Distribution of the STN's single zoom parameter.
+
+    A degenerate spike means the re-initialised ``fc_loc.0`` never learned
+    anything and the transformer is passing its input straight through.
+    """
+    if s is None:
+        s = stn_scales(net, ds, max_n=max_n)
 
     fig, ax = plt.subplots(figsize=(6, 3.8))
     ax.hist(s, bins=50, color="steelblue", alpha=0.85)
@@ -336,93 +343,293 @@ def stn_scale_hist(net, ds, cfg, out_dir, max_n=2000):
         )
     )
     ax.legend()
-    return _save(fig, out_dir, "stn_scale_hist.png")
+    return _save(fig, out_dir, f"{split}_stn_scale_hist.png")
 
 
-def display_space(name, values):
-    """Map a target into the units it is easiest to judge in.
+def _info(ds, n):
+    """The ``info.csv`` rows matching the first ``n`` dataset entries.
 
-    The network trains on `custom_logit_bt` because a logit is unbounded
-    and symmetric, which suits a Gaussian likelihood -- but bulge-to-total
-    is a fraction, and a plot of it should run 0 to 1.
-
-    `expit` is the plain inverse; `logit_custom` additionally nudges exact
-    0s and 1s inward by an epsilon derived from the training column, so
-    values that started at exactly 0 or 1 come back very close to, but not
-    exactly at, the endpoints. That is immaterial for a diagnostic plot.
-
-    Returns `(values, label, limits)`; limits is None to autoscale.
+    ``_predict`` and ``stn_scales`` both walk the dataset in order from the
+    start, so a plain head-slice of ``data_info`` lines up with what they
+    return. Nothing here reorders, and it must stay that way.
     """
-    if name == "custom_logit_bt":
-        from scipy.special import expit
-
-        return expit(values), "B/T", (0.0, 1.0)
-    return values, _pretty(name), None
+    return ds.data_info.iloc[:n]
 
 
-def devel_pred_vs_true(preds, truths, scaler, cfg, out_dir):
+def _physical(preds, truths, scaler):
+    """Scaled network space -> the run's target space, for both arrays."""
+    return scaler.inverse_transform(preds), scaler.inverse_transform(truths)
+
+
+def pred_vs_true(preds, truths, scaler, cfg, out_dir, split="devel"):
+    """G22 Fig. 11 / G23 Fig. 17: GALFIT value against predicted value."""
     names = _targets(cfg)
-    p = scaler.inverse_transform(preds)
-    t = scaler.inverse_transform(truths)
+    p, t = _physical(preds, truths, scaler)
 
-    fig, axes = plt.subplots(
-        1, len(names), figsize=(4.3 * len(names), 4.0), squeeze=False
-    )
-    axes = axes[0]
+    fig, axes = style.panel_grid(len(names))
     for i, (ax, name) in enumerate(zip(axes, names)):
         tv, label, lim = display_space(name, t[:, i])
         pv, _, _ = display_space(name, p[:, i])
 
-        ax.hexbin(
-            tv,
-            pv,
-            gridsize=35,
-            cmap="viridis",
-            mincnt=1,
-            extent=(lim + lim) if lim else None,
-        )
-        lo = lim[0] if lim else min(tv.min(), pv.min())
-        hi = lim[1] if lim else max(tv.max(), pv.max())
-        ax.plot([lo, hi], [lo, hi], "w--", lw=1.2)
+        style.hexbin(ax, tv, pv, extent=(lim + lim) if lim else None)
+        lo = lim[0] if lim else float(min(tv.min(), pv.min()))
+        hi = lim[1] if lim else float(max(tv.max(), pv.max()))
+        style.identity_line(ax, lo, hi)
         if lim:
             ax.set_xlim(*lim)
             ax.set_ylim(*lim)
         ax.set_xlabel(f"GALFIT {label}")
         ax.set_ylabel(f"predicted {label}")
-    fig.suptitle("Devel: predicted vs GALFIT", y=1.02)
-    return _save(fig, out_dir, "devel_pred_vs_true.png")
+    fig.suptitle(f"{split.capitalize()}: predicted vs GALFIT", y=1.02)
+    return _save(fig, out_dir, f"{split}_pred_vs_true.png")
 
 
-def devel_residual_hist(preds, truths, scaler, cfg, out_dir):
+def residual_hist(preds, truths, scaler, cfg, out_dir, split="devel"):
+    """G22 Fig. 12 / G23 Fig. 18: residual histograms with boxed statistics."""
     names = _targets(cfg)
-    resid = scaler.inverse_transform(preds) - scaler.inverse_transform(truths)
+    p, t = _physical(preds, truths, scaler)
+
+    fig, axes = style.panel_grid(len(names), height=3.6)
+    for i, (ax, name) in enumerate(zip(axes, names)):
+        r, label = style.residual(name, p[:, i], t[:, i])
+        finite = r[np.isfinite(r)]
+        ax.hist(finite, bins=45, color="slateblue", alpha=0.85)
+        ax.axvline(0, color="k", lw=1)
+        ax.set_xlabel(label)
+        ax.set_ylabel("count")
+        style.stats_box(ax, finite)
+    fig.suptitle(f"{split.capitalize()} residuals", y=1.02)
+    return _save(fig, out_dir, f"{split}_residual_hist.png")
+
+
+def residual_vs_true(preds, truths, scaler, cfg, out_dir, split="devel"):
+    """G22 Fig. 13: residuals against the true (GALFIT) value.
+
+    The companion to the residual-vs-*predicted* figure in
+    ``posterior_figures``. This one conditions on the truth, so it says
+    where the model is wrong; that one conditions on the prediction, which
+    is the only thing available at inference time and therefore the one
+    that can define a quality flag.
+    """
+    names = _targets(cfg)
+    p, t = _physical(preds, truths, scaler)
+
+    fig, axes = style.panel_grid(len(names))
+    for i, (ax, name) in enumerate(zip(axes, names)):
+        tv, label, lim = display_space(name, t[:, i])
+        r, rlabel = style.residual(name, p[:, i], t[:, i])
+        ok = np.isfinite(tv) & np.isfinite(r)
+        style.hexbin(ax, tv[ok], r[ok])
+        style.zero_line(ax)
+        style.overlay_percentiles(ax, tv[ok], r[ok])
+        style.robust_ylim(ax, r[ok])
+        ax.set_xlabel(f"GALFIT {label}")
+        ax.set_ylabel(rlabel)
+        if i == 0:
+            ax.legend(fontsize=7, loc="upper right")
+    fig.suptitle(f"{split.capitalize()}: residual vs GALFIT value", y=1.02)
+    return _save(fig, out_dir, f"{split}_residual_vs_true.png")
+
+
+def fractional_residual_vs_observables(
+    preds, truths, scaler, ds, cfg, out_dir, split="devel"
+):
+    """G22 Fig. 16: residuals against magnitude and against size.
+
+    Both degrade for faint and for small galaxies, and this is the figure
+    that says where. Magnitude comes from the catalog (``mag_sel``); size
+    is the GALFIT ``R_e`` label rather than the prediction, because the
+    point is to bin by a property the model did not choose.
+    """
+    names = _targets(cfg)
+    p, t = _physical(preds, truths, scaler)
+    info = _info(ds, len(p))
+
+    axis_cols = [
+        ("mag_sel", "catalog magnitude"),
+        ("R_e_asec", 'GALFIT $R_e$ ["]'),
+    ]
+    axis_cols = [(c, lab) for c, lab in axis_cols if c in info.columns]
+    if not axis_cols:
+        raise ValueError("info.csv has neither mag_sel nor R_e_asec")
 
     fig, axes = plt.subplots(
-        1, len(names), figsize=(4.3 * len(names), 3.6), squeeze=False
+        len(axis_cols),
+        len(names),
+        figsize=(4.3 * len(names), 3.8 * len(axis_cols)),
+        squeeze=False,
     )
-    axes = axes[0]
-    for i, (ax, name) in enumerate(zip(axes, names)):
-        r = resid[:, i]
-        ax.hist(r, bins=45, color="slateblue", alpha=0.85)
+    for row, (col, xlabel) in enumerate(axis_cols):
+        x = np.asarray(info[col], dtype=float)
+        log_x = col == "R_e_asec"
+        for i, name in enumerate(names):
+            ax = axes[row, i]
+            r, rlabel = style.residual(name, p[:, i], t[:, i])
+            ok = np.isfinite(x) & np.isfinite(r) & (x > 0 if log_x else True)
+            style.hexbin(
+                ax, x[ok], r[ok], xscale="log" if log_x else None
+            )
+            style.zero_line(ax)
+            style.overlay_percentiles(ax, x[ok], r[ok])
+            style.robust_ylim(ax, r[ok])
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(rlabel)
+    fig.suptitle(f"{split.capitalize()}: residuals vs magnitude and size")
+    return _save(fig, out_dir, f"{split}_residual_vs_observables.png")
+
+
+def bt_residual_split(preds, truths, scaler, cfg, out_dir, split="devel"):
+    """G22 Fig. 15, adapted: B/T residuals split by B/T regime.
+
+    G22 split this by single- against double-component, which their
+    *simulated* set supported by construction. Our labels are all
+    two-component GALFIT fits and no ``bt`` in them is exactly 0 or 1
+    (VIS z0 runs 0.0072 to 0.9953), so that split has no source here.
+
+    The split that does mean something for us is the one G22 also drew and
+    G23 acted on: the well-constrained middle band against the extremes,
+    where GaMPEN's B/T is known to pile up and where the qualitative
+    bulge-/disk-dominated labels replace the number.
+    """
+    names = _targets(cfg)
+    if "custom_logit_bt" not in names:
+        raise ValueError("this run has no B/T target")
+    k = names.index("custom_logit_bt")
+    p, t = _physical(preds, truths, scaler)
+
+    from scipy.special import expit
+
+    bt_true = expit(t[:, k])
+    r, rlabel = style.residual("custom_logit_bt", p[:, k], t[:, k])
+
+    mid = (bt_true > 0.1) & (bt_true < 0.85)
+    subsets = [
+        ("all", np.ones_like(mid, dtype=bool), "slateblue"),
+        ("0.1 < B/T < 0.85", mid, "seagreen"),
+        ("B/T < 0.1 or > 0.85", ~mid, "indianred"),
+    ]
+
+    fig, axes = style.panel_grid(len(subsets), width=4.0, height=3.6)
+    for ax, (label, sel, colour) in zip(axes, subsets):
+        vals = r[sel & np.isfinite(r)]
+        if vals.size:
+            ax.hist(vals, bins=40, color=colour, alpha=0.85)
+            style.stats_box(ax, vals)
         ax.axvline(0, color="k", lw=1)
-        ax.set_xlabel(f"pred - GALFIT  ({_pretty(name)})")
+        ax.set_title(label, fontsize=10)
+        ax.set_xlabel(rlabel)
         ax.set_ylabel("count")
+    fig.suptitle(f"{split.capitalize()}: B/T residuals by regime", y=1.02)
+    return _save(fig, out_dir, f"{split}_bt_residual_split.png")
+
+
+def stn_extremes(net, ds, cfg, out_dir, n=6, s=None, max_n=2000, split="devel"):
+    """G22 Fig. 5 / G23 Fig. 15: the most and least aggressive crops.
+
+    A correctly-trained STN crops small galaxies hard and large ones
+    barely, so the two rows should look visibly different in apparent
+    size. If they do not, the head is not conditioning on the image.
+    """
+    import torch
+
+    if s is None:
+        s = stn_scales(net, ds, max_n=max_n)
+    n = int(min(n, len(s) // 2))
+    if n < 1:
+        raise ValueError("not enough galaxies for an extremes montage")
+
+    order = np.argsort(s)
+    picks = [("lowest s\n(tightest crop)", order[:n]),
+             ("highest s\n(widest crop)", order[-n:][::-1])]
+
+    base = net.module if hasattr(net, "module") else net
+    fig, axes = plt.subplots(2, n, figsize=(1.9 * n, 4.3), squeeze=False)
+    for row, (label, idxs) in enumerate(picks):
+        batch = torch.stack([ds[int(i)][0] for i in idxs])
+        with torch.no_grad():
+            warped = base.spatial_transform(batch)
+        for col in range(n):
+            ax = axes[row, col]
+            ax.imshow(warped[col, 0].numpy(), origin="lower", cmap="magma")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_title(f"s = {s[idxs[col]]:.3f}", fontsize=7)
+        axes[row, 0].set_ylabel(label, fontsize=8)
+    # Say what s means in field terms. "Barely cropped" would be wrong here:
+    # our trained s runs ~0.13-0.19, so even the widest crop keeps under a
+    # fifth of the stamp. Each panel is auto-normalised independently, so
+    # compare apparent *size*, not brightness, between the rows.
+    fig.suptitle(
+        "STN crops at the extremes of the zoom parameter\n"
+        f"s = {s.min():.3f}-{s.max():.3f}, i.e. {s.min():.0%}-{s.max():.0%} "
+        "of the stamp kept",
+        fontsize=10,
+    )
+    return _save(fig, out_dir, f"{split}_stn_extremes.png")
+
+
+def stn_scale_vs_re(net, ds, cfg, out_dir, s=None, max_n=2000, split="devel"):
+    """The quantitative version of the STN extremes figure.
+
+    Not in either paper, but it is the cleanest pass/fail on the one layer
+    we re-initialise: ``s`` should rise with GALFIT ``R_e`` -- a big galaxy
+    needs a wider field kept -- and a flat cloud means ``fc_loc.0`` learned
+    nothing. Spearman is used rather than Pearson because only the
+    monotonic trend is claimed, not its shape.
+    """
+    if s is None:
+        s = stn_scales(net, ds, max_n=max_n)
+    info = _info(ds, len(s))
+    if "R_e_asec" not in info.columns:
+        raise ValueError("info.csv has no R_e_asec column")
+    re = np.asarray(info["R_e_asec"], dtype=float)
+
+    ok = np.isfinite(re) & np.isfinite(s) & (re > 0)
+    re, sv = re[ok], np.asarray(s)[ok]
+
+    from scipy.stats import spearmanr
+
+    rho, pval = spearmanr(re, sv)
+
+    fig, ax = plt.subplots(figsize=(6.0, 4.4))
+    ax.scatter(re, sv, s=6, alpha=0.35, color="steelblue", edgecolors="none")
+    style.overlay_percentiles(ax, re, sv)
+    ax.set_xscale("log")
+    ax.set_xlabel('GALFIT $R_e$ ["]')
+    ax.set_ylabel("STN zoom parameter s")
+
+    # The trend is the point of this figure, and it lives in a narrow band of
+    # s. Forcing the identity line into view flattens that band into a sliver
+    # and hides the very thing being tested, so identity is drawn only when it
+    # is already on scale and stated in words otherwise.
+    pad = 0.15 * (sv.max() - sv.min() or 1.0)
+    lo, hi = sv.min() - pad, sv.max() + pad
+    if lo <= 1.0 <= hi:
+        ax.axhline(1.0, color="crimson", ls="--", lw=1.0, label="identity (s = 1)")
+    else:
+        ax.set_ylim(lo, hi)
         ax.text(
+            0.98,
             0.03,
-            0.97,
-            f"$\\mu$ {r.mean():+.4f}\nmed {np.median(r):+.4f}\n"
-            f"$\\sigma$ {r.std():.4f}",
+            f"identity (s = 1) off scale;\nmedian crop keeps {np.median(sv):.0%} "
+            "of the field",
             transform=ax.transAxes,
-            va="top",
-            ha="left",
-            fontsize=8,
+            ha="right",
+            va="bottom",
+            fontsize=7,
             bbox=dict(boxstyle="round", fc="white", alpha=0.8),
         )
-    fig.suptitle("Devel residuals", y=1.02)
-    return _save(fig, out_dir, "devel_residual_hist.png")
+
+    ax.set_title(
+        f"STN scale vs galaxy size\nSpearman $\\rho$ = {rho:+.3f}  "
+        f"(p = {pval:.1e},  N = {sv.size})",
+        fontsize=9,
+    )
+    ax.legend(fontsize=7, loc="upper left")
+    return _save(fig, out_dir, f"{split}_stn_scale_vs_re.png")
 
 
-def input_pixel_hist(ds, cfg, out_dir, max_n=200):
+def input_pixel_hist(ds, cfg, out_dir, max_n=200, split="devel"):
     """arsinh-normalised Euclid pixels, against HSC if we have it.
 
     With ``pixel_zp = none`` the Euclid distribution is expected to sit about
@@ -471,7 +678,7 @@ def input_pixel_hist(ds, cfg, out_dir, max_n=200):
     ax.set_ylabel("density")
     ax.set_title("Input dynamic range (gating diagnostic)")
     ax.legend(fontsize=8, loc="upper left")
-    return _save(fig, out_dir, "input_pixel_hist.png")
+    return _save(fig, out_dir, f"{split}_input_pixel_hist.png")
 
 
 def _find_hsc_demo():
@@ -552,13 +759,18 @@ def label_dists(cfg, scaler, out_dir):
 # --- entry point -------------------------------------------------------------
 
 
-def make_all(run_dir, out_dir=None):
+def make_all(run_dir, out_dir=None, split="devel"):
     """Produce every figure that this run has the ingredients for.
 
     Figures land beside the run they describe, so a run directory is one
     self-contained thing. Resolution order is the explicit `out_dir`, then
     the run's recorded `figures_dir`, then `training_eval_figs/` inside the
     run directory.
+
+    `split` defaults to devel on purpose. The test split must stay
+    unlooked-at until a model is frozen -- every hyperparameter decision,
+    dropout calibration included, is a validation activity -- so seeing it
+    requires typing `--split test`.
     """
     run_dir = Path(run_dir)
     cfg = json.loads((run_dir / "config.json").read_text())
@@ -578,6 +790,7 @@ def make_all(run_dir, out_dir=None):
             failed.append(name)
             log.warning("%s: skipped (%s)", name, exc)
 
+    # metrics.csv only -- these describe the run, not a split.
     attempt("loss_curve", loss_curve, df, cfg, out_dir)
     attempt("lr_schedule", lr_schedule, df, cfg, out_dir)
     attempt("elementwise_mae", elementwise_mae, df, cfg, out_dir)
@@ -585,12 +798,13 @@ def make_all(run_dir, out_dir=None):
 
     ds = scaler = net = None
     try:
-        ds, scaler = rebuild_devel(cfg)
+        ds, scaler = rebuild_devel(cfg, split=split)
     except Exception as exc:  # noqa: BLE001
-        log.warning("could not rebuild the devel split (%s)", exc)
+        log.warning("could not rebuild the %s split (%s)", split, exc)
 
     if ds is not None:
-        attempt("input_pixel_hist", input_pixel_hist, ds, cfg, out_dir)
+        attempt("input_pixel_hist", input_pixel_hist, ds, cfg, out_dir,
+                split=split)
         attempt("label_dists", label_dists, cfg, scaler, out_dir)
         try:
             net = load_best_model(cfg, run_dir)
@@ -598,30 +812,42 @@ def make_all(run_dir, out_dir=None):
             log.warning("could not load best.pt (%s)", exc)
 
     if net is not None and ds is not None:
-        attempt("stn_crops", stn_crops, net, ds, cfg, out_dir)
-        attempt("stn_scale_hist", stn_scale_hist, net, ds, cfg, out_dir)
+        # One pass over the localisation head feeds all three STN figures.
+        scales = None
+        try:
+            scales = stn_scales(net, ds)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("STN scales unavailable (%s)", exc)
+
+        attempt("stn_crops", stn_crops, net, ds, cfg, out_dir, split=split)
+        attempt("stn_scale_hist", stn_scale_hist, net, ds, cfg, out_dir,
+                s=scales, split=split)
+        attempt("stn_extremes", stn_extremes, net, ds, cfg, out_dir,
+                s=scales, split=split)
+        attempt("stn_scale_vs_re", stn_scale_vs_re, net, ds, cfg, out_dir,
+                s=scales, split=split)
+
         try:
             preds, truths = _predict(net, ds)
-            attempt(
-                "devel_pred_vs_true",
-                devel_pred_vs_true,
-                preds,
-                truths,
-                scaler,
-                cfg,
-                out_dir,
-            )
-            attempt(
-                "devel_residual_hist",
-                devel_residual_hist,
-                preds,
-                truths,
-                scaler,
-                cfg,
-                out_dir,
-            )
         except Exception as exc:  # noqa: BLE001
-            log.warning("devel prediction failed (%s)", exc)
+            log.warning("%s prediction failed (%s)", split, exc)
+        else:
+            common = (preds, truths, scaler, cfg, out_dir)
+            attempt("pred_vs_true", pred_vs_true, *common, split=split)
+            attempt("residual_hist", residual_hist, *common, split=split)
+            attempt("residual_vs_true", residual_vs_true, *common, split=split)
+            attempt("bt_residual_split", bt_residual_split, *common, split=split)
+            attempt(
+                "fractional_residual_vs_observables",
+                fractional_residual_vs_observables,
+                preds,
+                truths,
+                scaler,
+                ds,
+                cfg,
+                out_dir,
+                split=split,
+            )
 
     log.info("figures: %d written to %s", len(made), out_dir)
     if failed:
@@ -630,13 +856,23 @@ def make_all(run_dir, out_dir=None):
 
 
 def main(argv=None):
+    import argparse
+
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv:
-        raise SystemExit(
-            "usage: python -m ggt.visualization.training_figures <run_dir>"
-        )
-    make_all(argv[0])
+    ap = argparse.ArgumentParser(
+        prog="python -m ggt.visualization.training_figures",
+        description="Diagnostic figures for a stage-04 training run.",
+    )
+    ap.add_argument("run_dir")
+    ap.add_argument(
+        "--split",
+        default="devel",
+        help="split to draw (default devel; test only when a model is frozen)",
+    )
+    ap.add_argument("--out-dir", default=None)
+    args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    make_all(args.run_dir, out_dir=args.out_dir, split=args.split)
     return 0
 
 
