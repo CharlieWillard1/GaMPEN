@@ -778,6 +778,34 @@ def label_dists(cfg, scaler, out_dir):
 # --- entry point -------------------------------------------------------------
 
 
+#: Figures that once had no split prefix. When the prefixed version is
+#: written, a leftover copy under the old name is removed: two files a
+#: rename apart, differing only by a prefix, is a trap -- the stale one
+#: looks perfectly current and silently predates whatever fix prompted the
+#: redraw.
+_RENAMED_UNPREFIXED = (
+    "stn_crops.png",
+    "stn_scale_hist.png",
+    "stn_extremes.png",
+    "stn_scale_vs_re.png",
+    "input_pixel_hist.png",
+)
+
+
+def _drop_legacy_unprefixed(out_dir, made):
+    """Remove old unprefixed copies of figures we have just rewritten.
+
+    Only names this module itself used to write, and only once the
+    replacement exists, so nothing a user put here by hand is at risk.
+    """
+    written = {Path(p).name for p in made if p}
+    for name in _RENAMED_UNPREFIXED:
+        stale = Path(out_dir) / name
+        if stale.exists() and any(w.endswith("_" + name) for w in written):
+            stale.unlink()
+            log.info("removed stale unprefixed %s", stale.name)
+
+
 def make_all(run_dir, out_dir=None, split="devel"):
     """Produce every figure that this run has the ingredients for.
 
@@ -867,6 +895,8 @@ def make_all(run_dir, out_dir=None, split="devel"):
                 out_dir,
                 split=split,
             )
+
+    _drop_legacy_unprefixed(out_dir, made)
 
     log.info("figures: %d written to %s", len(made), out_dir)
     if failed:
