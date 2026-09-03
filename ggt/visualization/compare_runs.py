@@ -116,6 +116,38 @@ def check_comparable(runs):
 # --- metrics -----------------------------------------------------------------
 
 
+def run_curves(run, percentiles=cov.DEFAULT_PERCENTILES):
+    """Coverage curves for one run, computed once and remembered.
+
+    Both the summary table and the sweep figure want these, and each curve
+    is a KDE plus a mode-outward walk for every galaxy -- tens of seconds
+    per parameter. Computing them twice doubled the cost of every
+    comparison, which is most of the wall-clock in a three-run sweep.
+
+    Cached on the run dict, so a notebook that calls `summary_table` and
+    then `coverage_sweep` pays for them once.
+    """
+    key = ("_curves", tuple(percentiles))
+    if run.get("_curves_key") == key:
+        return run["_curves"]
+
+    curves = {}
+    for col in pf.PHYSICAL_COLUMNS:
+        tcol = pf._TRUTH_COLUMN.get(col)
+        if col not in run["samples"] or tcol not in run["truths"]:
+            continue
+        try:
+            achieved, _, _ = cov.coverage_curve(
+                run["samples"][col], run["truths"][tcol],
+                percentiles=percentiles,
+            )
+            curves[col] = achieved
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s/%s: coverage failed (%s)", run["name"], col, exc)
+    run["_curves"], run["_curves_key"] = curves, key
+    return curves
+
+
 def run_metrics(run, percentiles=cov.DEFAULT_PERCENTILES):
     """Per-parameter accuracy and calibration for one run.
 
@@ -123,7 +155,7 @@ def run_metrics(run, percentiles=cov.DEFAULT_PERCENTILES):
     rather than the plain standard deviation: a handful of catastrophic
     outliers should not decide which of two runs looks better.
     """
-    df, truths, samples = run["df"], run["truths"], run["samples"]
+    df, truths = run["df"], run["truths"]
     rows = []
     for col in pf.PHYSICAL_COLUMNS:
         tcol = pf._TRUTH_COLUMN.get(col)
@@ -144,19 +176,14 @@ def run_metrics(run, percentiles=cov.DEFAULT_PERCENTILES):
                 if r.size else np.nan
             ),
         }
-        if col in samples:
-            try:
-                achieved, _, _ = cov.coverage_curve(
-                    samples[col], truths[tcol], percentiles=percentiles
-                )
-                entry["coverage_68"] = float(
-                    achieved[list(percentiles).index(0.6827)]
-                )
-                entry["coverage_dev"] = cov.deviation_from_diagonal(
-                    percentiles, achieved
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("%s/%s: coverage failed (%s)", run["name"], col, exc)
+        achieved = run_curves(run, percentiles).get(col)
+        if achieved is not None:
+            entry["coverage_68"] = float(
+                achieved[list(percentiles).index(0.6827)]
+            )
+            entry["coverage_dev"] = cov.deviation_from_diagonal(
+                percentiles, achieved
+            )
         rows.append(entry)
     return rows
 
@@ -197,16 +224,12 @@ def coverage_sweep(runs, out_dir, split="devel", key="dropout"):
     ax.plot([0, 1], [0, 1], "k--", lw=1.2, label="perfect calibration")
 
     best = None
+    pcts = np.asarray(cov.DEFAULT_PERCENTILES, dtype=float)
     for run in runs:
-        by_target, truth_by_target = {}, {}
-        for col in pf.PHYSICAL_COLUMNS:
-            tcol = pf._TRUTH_COLUMN.get(col)
-            if col in run["samples"] and tcol in run["truths"]:
-                by_target[col] = run["samples"][col]
-                truth_by_target[col] = run["truths"][tcol]
-        if not by_target:
+        curves = run_curves(run)
+        if not curves:
             continue
-        pcts, _, mean = cov.coverage_table(by_target, truth_by_target)
+        mean = np.mean(np.vstack(list(curves.values())), axis=0)
         dev = cov.deviation_from_diagonal(pcts, mean)
         label = f"{run['cfg'].get(key)}  ({dev:.1f}%)"
         ax.plot(pcts, mean, marker="o", ms=3.5, lw=1.4, label=label)
