@@ -230,9 +230,27 @@ def coverage_sweep(runs, out_dir, split="devel", key="dropout"):
         if not curves:
             continue
         mean = np.mean(np.vstack(list(curves.values())), axis=0)
-        dev = cov.deviation_from_diagonal(pcts, mean)
+
+        # Rank on the mean of the per-parameter deviations, not on the
+        # deviation of the mean curve. Those are not the same number, and
+        # the difference is not cosmetic: a run whose parameters are
+        # miscalibrated in *opposite* directions -- magnitude below the
+        # diagonal, size above it -- has them cancel in the averaged curve
+        # and scores better than a run that is consistently a little wide.
+        # The averaged curve is still what gets drawn, because that is
+        # G22 Fig. 8, but it is not what decides the winner.
+        per_param = [
+            cov.deviation_from_diagonal(pcts, a) for a in curves.values()
+        ]
+        dev = float(np.mean(per_param))
+        curve_dev = cov.deviation_from_diagonal(pcts, mean)
         label = f"{run['cfg'].get(key)}  ({dev:.1f}%)"
         ax.plot(pcts, mean, marker="o", ms=3.5, lw=1.4, label=label)
+        log.info(
+            "%-28s mean per-parameter deviation %.2f%%  "
+            "(deviation of the averaged curve %.2f%%)",
+            run["name"], dev, curve_dev,
+        )
         if best is None or dev < best[1]:
             best = (run["name"], dev, run["cfg"].get(key))
 
@@ -246,7 +264,8 @@ def coverage_sweep(runs, out_dir, split="devel", key="dropout"):
         title += f"\nbest: {best[2]} ({best[1]:.1f}% mean deviation)"
     ax.set_title(title, fontsize=10)
     ax.legend(fontsize=7.5, loc="lower right",
-              title=COMPARISON_KEYS.get(key, key), title_fontsize=7.5)
+              title=f"{COMPARISON_KEYS.get(key, key)}\n(mean per-parameter dev.)",
+              title_fontsize=7.5)
     return _save(fig, out_dir, f"{split}_coverage_sweep_{key}.png")
 
 
