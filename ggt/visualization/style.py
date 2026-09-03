@@ -29,11 +29,13 @@ log = logging.getLogger(__name__)
 
 DPI = 130
 
-#: Colour floor and draw threshold for every population 2D histogram. Held
-#: equal on purpose: the bottom of the colourbar is then exactly the fewest
-#: galaxies a drawn cell can hold, so the scale means what it says.
-HEXBIN_VMIN = 3
-HEXBIN_MINCNT = 3
+#: Colour floor and draw threshold for every population 2D histogram. Both
+#: are 1: a cell holding a single galaxy is drawn, and the colour scale
+#: starts there. Raising them thins the sparse wings, which reads as
+#: cleaner but drops the isolated outliers these diagnostics exist to
+#: show -- tried at 3 and reverted.
+HEXBIN_VMIN = 1
+HEXBIN_MINCNT = 1
 
 #: Type sizes for the coverage figures, which live in two different modules
 #: (`posterior_figures.coverage_figure` and `compare_runs.coverage_sweep`)
@@ -116,17 +118,16 @@ def hexbin(
     at the centre of the distribution and shows nothing about the wings,
     which is exactly where a model fails.
 
-    Cells holding fewer than `mincnt` galaxies are not drawn, and the colour
-    scale starts at `vmin`. The two are equal by default, so the bottom of
-    the colourbar is exactly the fewest galaxies a visible cell can hold.
+    `mincnt=1` keeps single-galaxy cells visible rather than blending them
+    into the background, and `vmin` starts the colour scale at that same
+    count. The wings are where a model fails, so an isolated galaxy is
+    signal here, not noise to be tidied away.
 
-    **The trend lines are not restricted this way.** `overlay_percentiles`
-    and `robust_ylim` are computed from every finite point, including
-    galaxies whose cells fall below the threshold and are therefore
-    invisible here. That is deliberate -- a 16/84 spread taken only over the
-    dense region would understate the scatter -- but it does mean the dotted
-    percentile curves can run outside the drawn hexes. That is the data, not
-    a rendering fault.
+    Both are parameters should a particular panel want a higher floor, but
+    note that raising `mincnt` hides points which `overlay_percentiles` and
+    `robust_ylim` still include -- they are computed from every finite
+    point, so the dotted percentile curves would then run outside the drawn
+    hexes.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
