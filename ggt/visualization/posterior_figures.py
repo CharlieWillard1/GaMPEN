@@ -411,6 +411,28 @@ def _residual(col, pred, true):
     return pred - true
 
 
+def _sigma(col, df):
+    """The 68.27% interval width, in the same units as that column's residual.
+
+    For sizes and fluxes the residual is fractional, so the width must be
+    too -- an absolute width in ADU is dominated by how bright the galaxy
+    is, and plotting it against a fractional residual mixes two scales.
+    That mismatch alone flipped the flux correlation negative while
+    magnitude, which is the same quantity in logarithmic units, came out
+    strongly positive.
+
+    Returns `(values, label)`.
+    """
+    label = _AXIS[col][0]
+    width = np.asarray(df[f"{col}_sig_width"], dtype=float)
+    if col in ("preds_R_e_asec", "preds_total_flux_adus"):
+        mode = np.asarray(df[f"{col}_mode"], dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = np.where(mode != 0, width / mode, np.nan)
+        return frac, f"fractional 68.27% width ({label})"
+    return width, f"68.27% width ({label})"
+
+
 def _resid_label(col):
     label, _ = _AXIS[col]
     if col in ("preds_R_e_asec", "preds_total_flux_adus"):
@@ -628,14 +650,14 @@ def sigma_vs_predicted(df, out_dir, split="devel"):
     fig, axes = style.panel_grid(len(cols))
     for ax, col in zip(axes, cols):
         pred = np.asarray(df[f"{col}_mode"], dtype=float)
-        sig = np.asarray(df[f"{col}_sig_width"], dtype=float)
+        sig, siglabel = _sigma(col, df)
         label, log_x = _AXIS[col]
         ok = np.isfinite(pred) & np.isfinite(sig) & ((pred > 0) if log_x else True)
         style.hexbin(ax, pred[ok], sig[ok], xscale="log" if log_x else None)
         style.overlay_percentiles(ax, pred[ok], sig[ok])
         style.robust_ylim(ax, sig[ok])
         ax.set_xlabel(f"predicted {label}")
-        ax.set_ylabel(f"68.27% interval width ({label})")
+        ax.set_ylabel(siglabel)
     fig.suptitle(f"{split.capitalize()}: predicted $\\sigma$ vs prediction")
     return _save(fig, out_dir, f"{split}_sigma_vs_predicted.png")
 
@@ -654,7 +676,7 @@ def sigma_vs_residual(df, truths, out_dir, split="devel"):
         if tcol not in truths:
             raise ValueError(f"no GALFIT truth column `{tcol}` for {col}")
         pred = np.asarray(df[f"{col}_mode"], dtype=float)
-        sig = np.asarray(df[f"{col}_sig_width"], dtype=float)
+        sig, siglabel = _sigma(col, df)
         r = np.abs(_residual(col, pred, truths[tcol]))
         ok = np.isfinite(sig) & np.isfinite(r)
         style.hexbin(ax, sig[ok], r[ok])
@@ -663,7 +685,7 @@ def sigma_vs_residual(df, truths, out_dir, split="devel"):
         from scipy.stats import spearmanr
 
         rho, _ = spearmanr(sig[ok], r[ok])
-        ax.set_xlabel(f"68.27% interval width ({_AXIS[col][0]})")
+        ax.set_xlabel(siglabel)
         ax.set_ylabel(f"|{_resid_label(col)}|")
         ax.set_title(f"Spearman $\\rho$ = {rho:+.3f}", fontsize=9)
     fig.suptitle(f"{split.capitalize()}: predicted $\\sigma$ vs |residual|")
@@ -727,8 +749,23 @@ def bt_qualitative(df, truths, out_dir, split="devel"):
     ax.set_yticks(range(3), labels, fontsize=7)
     ax.set_xlabel("GaMPEN class")
     ax.set_ylabel("GALFIT class")
-    acc = np.trace(cm) / cm.sum() if cm.sum() else np.nan
-    ax.set_title(f"Row-normalised confusion  (accuracy {acc:.2f})", fontsize=10)
+    # Raw accuracy on these three classes is dominated by the intermediate
+    # bin, which holds most of the sample. A model that answers
+    # "intermediate" every time scores the majority base rate, so quote that
+    # alongside -- otherwise 0.91 reads as good when it means nothing was
+    # learned about the extremes.
+    total = cm.sum()
+    acc = np.trace(cm) / total if total else np.nan
+    baseline = cm.sum(axis=0).max() / total if total else np.nan
+    per_class = np.divide(np.diag(cm), cm.sum(axis=1),
+                          out=np.full(3, np.nan), where=cm.sum(axis=1) > 0)
+    balanced = np.nanmean(per_class)
+    ax.set_title(
+        f"Row-normalised confusion\n"
+        f"accuracy {acc:.2f}  (majority baseline {baseline:.2f}, "
+        f"balanced {balanced:.2f})",
+        fontsize=9,
+    )
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     fig.suptitle(f"{split.capitalize()}: qualitative B/T classes")
