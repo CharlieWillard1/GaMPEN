@@ -142,6 +142,10 @@ def run_curves(run, percentiles=cov.DEFAULT_PERCENTILES):
                 percentiles=percentiles,
             )
             curves[col] = achieved
+            # Each curve is a KDE and a mode-outward walk per galaxy, tens
+            # of seconds. Say so as they land: silence through a multi-
+            # minute computation is indistinguishable from a hang.
+            log.info("  coverage %-28s %-22s done", run["name"], col)
         except Exception as exc:  # noqa: BLE001
             log.warning("%s/%s: coverage failed (%s)", run["name"], col, exc)
     run["_curves"], run["_curves_key"] = curves, key
