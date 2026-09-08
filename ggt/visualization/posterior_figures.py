@@ -530,6 +530,7 @@ def corner_plot(df, samples, truths, out_dir, split="devel", index=None, seed=42
     represent, which is why this figure is worth drawing once.
     """
     cols = [c for c in PHYSICAL_COLUMNS if c in samples and c != "preds_total_flux_adus"]
+    explicit = index
     if index is None:
         # A galaxy with a truth for every parameter, chosen reproducibly.
         rng = np.random.default_rng(seed)
@@ -562,12 +563,13 @@ def corner_plot(df, samples, truths, out_dir, split="devel", index=None, seed=42
                 ax.set_xlabel(_AXIS[cols[j]][0], fontsize=9)
             if j == 0 and i != 0:
                 ax.set_ylabel(_AXIS[cols[i]][0], fontsize=9)
-    fig.suptitle(
-        f"Joint posterior, object {int(df['object_id'].iloc[index])}  "
-        "(red = GALFIT)",
-        y=1.0,
-    )
-    return _save(fig, out_dir, f"{split}_corner.png")
+    oid = int(df["object_id"].iloc[index])
+    fig.suptitle(f"Joint posterior, object {oid}  (red = GALFIT)", y=1.0)
+    # A caller that named a galaxy wants that galaxy's file, not to
+    # overwrite the run's default corner plot; several explicit indices in a
+    # row would otherwise leave one figure.
+    name = f"{split}_corner.png" if explicit is None else f"{split}_corner_{oid}.png"
+    return _save(fig, out_dir, name)
 
 
 def coverage_figure(samples, truths, out_dir, split="devel"):
