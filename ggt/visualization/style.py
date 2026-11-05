@@ -45,7 +45,14 @@ COVERAGE_FONTS = {"title": 12, "label": 12.5, "tick": 11, "legend": 10}
 #: Targets whose residuals are best judged as a fraction of the truth.
 #: `custom_logit_bt` is deliberately absent: B/T is already a fraction, and
 #: dividing a fraction by a fraction near zero explodes.
+#: Any other `ln_*` target (e.g. GAMPEN_V2's per-band `ln_flux_<band>_ujy`)
+#: is treated the same way -- see `is_fractional`.
 FRACTIONAL_TARGETS = ("ln_R_e_asec", "ln_total_flux_adus")
+
+
+def is_fractional(name):
+    """True for log-space targets, whose exp(difference) - 1 is the fractional residual."""
+    return name in FRACTIONAL_TARGETS or str(name).startswith("ln_")
 
 
 def save(fig, out_dir, name):
@@ -98,7 +105,7 @@ def residual(name, pred, true):
     """
     pred = np.asarray(pred, dtype=float)
     true = np.asarray(true, dtype=float)
-    if name in FRACTIONAL_TARGETS:
+    if is_fractional(name):
         with np.errstate(over="ignore"):
             return np.exp(pred - true) - 1.0, f"({pretty(name)} frac. residual)"
     if name == "custom_logit_bt":

@@ -102,14 +102,32 @@ def _pick_device():
     return f"cuda:{best}"
 
 
+def cov_head_width(num_var):
+    """`n_out` of a full-covariance (`aleatoric_cov`) head for `num_var` targets."""
+    return (3 * num_var + num_var**2) // 2
+
+
+def uncertainty_kind(n_out, n_targets):
+    """Which uncertainty model a head of width `n_out` implies."""
+    if n_targets and n_out == cov_head_width(n_targets):
+        return "aleatoric_cov (full covariance)"
+    if n_targets and n_out == 2 * n_targets:
+        return "aleatoric (diagonal)"
+    return "mean only (no aleatoric term)"
+
+
 def _draw(preds, num_var):
     """One posterior draw per galaxy from a GaMPEN forward pass.
 
     **This is the step that makes the posterior a posterior.** GaMPEN's
     head emits more than a mean: with the `aleatoric_cov` loss its `n_out`
-    is `3 * num_var` -- the means, the log-variances, and the strictly
+    is `(3 n + n^2) / 2` -- n means, n log-variances, and n(n-1)/2 strictly
     lower-triangular covariance terms -- and the prediction for a galaxy is
     a *draw* from the Gaussian those describe, not the mean of it.
+
+    (For n = 3 that width happens to equal `3 n` = 9, which is what this
+    test used to check; for n = 6 it is 27, not 18, and the old test fell
+    through silently to the bare mean.)
 
     Taking only the means yields the epistemic (dropout) spread alone,
     which for our runs is roughly twenty times too narrow and produces
@@ -125,7 +143,7 @@ def _draw(preds, num_var):
 
     n_out = preds.shape[-1]
 
-    if n_out == 3 * num_var:
+    if n_out == cov_head_width(num_var):
         y_hat = preds[..., :num_var]
         var = torch.exp(preds[..., num_var : 2 * num_var])
         covs = preds[..., 2 * num_var :]
@@ -179,9 +197,7 @@ def mc_dropout_samples(net, ds, cfg, n_runs=500, batch_size=64, device=None):
     n_gal = len(ds.labels)
     n_targets = ds.labels.shape[1]
     n_out = int(cfg.get("n_out") or n_targets)
-    kind = {3: "aleatoric_cov (full covariance)", 2: "aleatoric (diagonal)"}.get(
-        n_out // n_targets if n_targets else 0, "mean only (no aleatoric term)"
-    )
+    kind = uncertainty_kind(n_out, n_targets)
     log.info("uncertainty model: %s  (n_out=%d, n_targets=%d)",
              kind, n_out, n_targets)
     out = np.empty((n_gal, n_runs, n_targets), dtype=np.float32)
