@@ -81,10 +81,10 @@ def display_space(name, values):
 
     Returns `(values, label, limits)`; limits is None to autoscale.
     """
-    if name == "custom_logit_bt":
+    if str(name).startswith("custom_logit_bt"):  # incl. GAMPEN_V2 per-band custom_logit_bt_<band>
         from scipy.special import expit
 
-        return expit(values), "B/T", (0.0, 1.0)
+        return expit(values), "B/T" + str(name)[len("custom_logit_bt"):].replace("_", " "), (0.0, 1.0)
     return values, pretty(name), None
 
 
@@ -108,10 +108,10 @@ def residual(name, pred, true):
     if is_fractional(name):
         with np.errstate(over="ignore"):
             return np.exp(pred - true) - 1.0, f"({pretty(name)} frac. residual)"
-    if name == "custom_logit_bt":
+    if str(name).startswith("custom_logit_bt"):
         from scipy.special import expit
 
-        return expit(pred) - expit(true), "B/T residual"
+        return expit(pred) - expit(true), "B/T" + str(name)[len("custom_logit_bt"):].replace("_", " ") + " residual"
     return pred - true, f"{pretty(name)} residual"
 
 
