@@ -50,7 +50,8 @@ def test_n_out_matches_aleatoric_cov():
 
 
 def _write_manifest(tmp_path, pixel_zp):
-    bin_dir = tmp_path / "gampen_data" / config.bin_dirname(Z_BIN)
+    # tmp_path is the training-set dir: it holds the bins directly
+    bin_dir = tmp_path / config.bin_dirname(Z_BIN)
     bin_dir.mkdir(parents=True)
     (bin_dir / "cache_manifest.json").write_text(
         json.dumps({"pixel_zp": pixel_zp, "crop_px": 400})
@@ -297,7 +298,7 @@ def test_reuse_rejects_a_split_that_predates_a_rebuilt_info_csv(tmp_path):
     """
     import pandas as pd
 
-    band_dir = tmp_path / "gampen_data" / config.bin_dirname(Z_BIN) / BAND
+    band_dir = tmp_path / config.bin_dirname(Z_BIN) / BAND
     (band_dir / "splits").mkdir(parents=True)
 
     def frame(ids):

@@ -677,6 +677,10 @@ def run(args):
         resolved["config_json"],
         args,
         {
+            # Lineage: what this run trained on, relative to the project root
+            # (Euclid_Gampen/) so the record is valid on Shire and on Tillicum.
+            "training_set": layout.relative_to_project(layout.gampen_data(root)),
+            "experiment": layout.runs_root().name,
             "resolved_cutout_size": cutout_size,
             "split_sizes": sizes,
             "split_slug": split_manifest["slug"],

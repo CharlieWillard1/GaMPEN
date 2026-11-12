@@ -5,9 +5,17 @@ One place that knows the directory convention, so bash, python and the
 notebooks cannot drift apart. Nothing here touches the filesystem except
 `ensure`.
 
-Data layout, under `data_root()`::
+Project layout (Euclid_Gampen lineage tree, see pipeline/common/euclid_paths.py)::
 
-    <root>/gampen_data/
+    $EUCLID_GAMPEN_ROOT  (default /astro/store/shire/cgwill/Euclid_Gampen)
+      datasets/<dataset>/training_sets/<name>/   <- a TRAINING SET: `data_root()` / `root`
+      pretrained/gampen_hsc/                      <- `pretrained_dir()`
+      models/<experiment>/<bin>/<band>/<run>/     <- `run_dir()`; runs_root() = models/<experiment>
+
+`root` (and `data_root()`) is the training-set directory, which holds the bins
+directly. It comes from `$EUCLID_GAMPEN_TRAINING_SET` (or a run's `--data-root`)::
+
+    <training set>/
       z0_0.00_0.25/
         cutouts.npy        (N, 4, crop, crop) float32 -- ALL sources in the
                            bin, ALL 4 bands
@@ -36,19 +44,38 @@ from pathlib import Path
 
 from ggt.surveys import euclid
 
-DEFAULT_DATA_ROOT = "/astro/store/shire/cgwill/Euclid_Gampen_Data"
+PROJECT_ROOT = Path(os.environ.get("EUCLID_GAMPEN_ROOT", "/astro/store/shire/cgwill/Euclid_Gampen"))
+# Default training set: real Q1, 72k uniform subset, GALFIT (constrained n_b) labels.
+DEFAULT_TRAINING_SET = PROJECT_ROOT / "datasets/q1_uniform72k_v1/training_sets/galfit_v1"
+DEFAULT_EXPERIMENT = "scratch"
+
+
+def training_set() -> Path:
+    """The training set in use: `$EUCLID_GAMPEN_TRAINING_SET`, else the default above."""
+    return Path(os.environ.get("EUCLID_GAMPEN_TRAINING_SET", DEFAULT_TRAINING_SET))
 
 
 def data_root() -> Path:
-    """Root of the off-repo data tree.
+    """Alias of `training_set()`: every `root` argument in this module means a training set."""
+    return training_set()
 
-    Override with `EUCLID_GAMPEN_DATA_ROOT`.
-    """
-    return Path(os.environ.get("EUCLID_GAMPEN_DATA_ROOT", DEFAULT_DATA_ROOT))
+
+def experiment() -> str:
+    return os.environ.get("EUCLID_GAMPEN_EXPERIMENT", DEFAULT_EXPERIMENT)
+
+
+def relative_to_project(path) -> str:
+    """`path` relative to the project root when inside it (portable to Tillicum), else absolute."""
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(p)
 
 
 def gampen_data(root=None) -> Path:
-    return Path(root or data_root()) / "gampen_data"
+    """The directory holding the bins (= the training set itself)."""
+    return Path(root or data_root())
 
 
 def bin_dir(z_bin: int, root=None) -> Path:
@@ -99,25 +126,29 @@ def scaler_path(z_bin: int, band: str, slug: str, root=None) -> Path:
 
 
 def pretrained_dir(root=None) -> Path:
-    return Path(root or data_root()) / "gampen_pretrained"
+    """Published HSC GaMPEN checkpoints (`root` is accepted for old callers and ignored)."""
+    return Path(os.environ.get("EUCLID_GAMPEN_PRETRAINED", PROJECT_ROOT / "pretrained/gampen_hsc"))
 
 
 # --- run outputs -------------------------------------------------------
 
 
 def runs_root(root=None) -> Path:
-    """Where checkpoints and metrics go. Big; lives on the data volume."""
+    """The experiment dir: models/<experiment>. Big; lives on the data volume.
+
+    `$EUCLID_GAMPEN_RUNS_ROOT` sets it directly; otherwise models/$EUCLID_GAMPEN_EXPERIMENT.
+    """
     override = os.environ.get("EUCLID_GAMPEN_RUNS_ROOT")
     if override:
         return Path(override)
-    return Path(root or data_root()) / "gampen_runs"
+    return PROJECT_ROOT / "models" / experiment()
 
 
 def logs_root(root=None) -> Path:
     override = os.environ.get("EUCLID_GAMPEN_LOGS_ROOT")
     if override:
         return Path(override)
-    return Path(root or data_root()) / "gampen_logs"
+    return runs_root() / "logs"
 
 
 def run_dir(z_bin: int, band: str, run_name: str, root=None) -> Path:
@@ -152,7 +183,7 @@ def main(argv=None) -> int:
         eval "$(python -m ggt.data.layout --z-bin 0 --band VIS \
                     --run-name my_run)"
 
-    defines DATA_ROOT, BIN_DIR, BAND_DIR, INFO_CSV, CACHE_NPY, RUN_DIR,
+    defines DATA_ROOT (the training set), BIN_DIR, BAND_DIR, INFO_CSV, CACHE_NPY, RUN_DIR,
     LOG_DIR and FIGURES_DIR. The launchers use this rather than rebuilding
     the directory convention in bash, where it would immediately fall out
     of step.
