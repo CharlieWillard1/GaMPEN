@@ -66,11 +66,17 @@ def experiment() -> str:
 
 def relative_to_project(path) -> str:
     """`path` relative to the project root when inside it (portable to Tillicum), else absolute."""
-    p = Path(path).resolve()
-    try:
-        return str(p.relative_to(PROJECT_ROOT.resolve()))
-    except ValueError:
-        return str(p)
+    p = Path(path)
+    for root in (PROJECT_ROOT,):
+        try:
+            return str(p.resolve().relative_to(Path(root).resolve()))
+        except (ValueError, OSError):
+            pass
+    # A path from the other side (Shire vs the Tillicum mirror): same tree, different prefix.
+    parts = p.parts
+    if "Euclid_Gampen" in parts:
+        return str(Path(*parts[parts.index("Euclid_Gampen") + 1:]))
+    return str(p)
 
 
 def gampen_data(root=None) -> Path:
